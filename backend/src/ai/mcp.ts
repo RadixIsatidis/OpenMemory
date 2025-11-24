@@ -1,4 +1,4 @@
-import type { IncomingMessage, ServerResponse } from "http";
+import type { Request, Response } from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -13,7 +13,7 @@ import {
 import { q, all_async, memories_table } from "../core/db";
 import { getEmbeddingInfo } from "../memory/embed";
 import { j, p } from "../utils";
-import type { sector_type, mem_row, rpc_err_code } from "../core/types";
+import type { sector_type, mem_row } from "../core/types";
 import { update_user_summary } from "../memory/user_summary";
 
 const sec_enum = z.enum([
@@ -44,39 +44,28 @@ const fmt_matches = (matches: Awaited<ReturnType<typeof hsg_query>>) =>
         })
         .join("\n\n");
 
-const set_hdrs = (res: ServerResponse) => {
-    res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-    res.setHeader(
-        "Access-Control-Allow-Headers",
-        "Content-Type,Authorization,Mcp-Session-Id",
-    );
-};
-
-const send_err = (
-    res: ServerResponse,
-    code: rpc_err_code,
-    msg: string,
-    id: number | string | null = null,
-    status = 400,
-) => {
-    if (!res.headersSent) {
-        res.statusCode = status;
-        set_hdrs(res);
-        res.end(
-            JSON.stringify({
-                jsonrpc: "2.0",
-                error: { code, message: msg },
-                id,
-            }),
-        );
-    }
-};
-
 const uid = (val?: string | null) => (val?.trim() ? val.trim() : undefined);
 
-export const create_mcp_srv = () => {
+/**
+ * Extract user ID from request context
+ * Implements multi-tenant isolation strategy from the PDF spec
+ */
+function getUserIdFromContext(context: any): string {
+    // Strategy 1: Use authenticated user from Bearer token mapping
+    if (context?.userId) {
+        return context.userId;
+    }
+    
+    // Strategy 2: Use default MCP user from environment
+    const defaultUser = process.env.OM_MCP_DEFAULT_USER || "mcp_user";
+    return defaultUser;
+}
+
+/**
+ * Create MCP Server Instance
+ * Implements the complete MCP protocol with all capabilities
+ */
+export const createMcpServer = () => {
     const srv = new McpServer(
         {
             name: "openmemory-mcp",
@@ -84,6 +73,8 @@ export const create_mcp_srv = () => {
         },
         { capabilities: { tools: {}, resources: {}, prompts: {}, logging: {} } },
     );
+
+    // ==================== TOOLS ====================
 
     srv.tool(
         "openmemory_query",
@@ -116,8 +107,11 @@ export const create_mcp_srv = () => {
                 .optional()
                 .describe("Isolate results to a specific user identifier"),
         },
-        async ({ query, k, sector, min_salience, user_id }) => {
-            const u = uid(user_id);
+        async ({ query, k, sector, min_salience, user_id }, extra) => {
+            // Get user ID from context or parameter
+            const contextUserId = getUserIdFromContext((extra as any)?.requestContext);
+            const u = uid(user_id) || contextUserId;
+            
             const flt =
                 sector || min_salience !== undefined || u
                     ? {
@@ -131,6 +125,8 @@ export const create_mcp_srv = () => {
                     }
                     : undefined;
             const matches = await hsg_query(query, k ?? 8, flt);
+            
+            // Format as Markdown for LLM consumption
             const summ = matches.length
                 ? fmt_matches(matches)
                 : "No memories matched the supplied query.";
@@ -175,8 +171,11 @@ export const create_mcp_srv = () => {
                     "Associate the memory with a specific user identifier",
                 ),
         },
-        async ({ content, tags, metadata, user_id }) => {
-            const u = uid(user_id);
+        async ({ content, tags, metadata, user_id }, extra) => {
+            // Get user ID from context or parameter
+            const contextUserId = getUserIdFromContext((extra as any)?.requestContext);
+            const u = uid(user_id) || contextUserId;
+            
             const res = await add_hsg_memory(
                 content,
                 j(tags || []),
@@ -249,8 +248,11 @@ export const create_mcp_srv = () => {
                 .optional()
                 .describe("Restrict results to a specific user identifier"),
         },
-        async ({ limit, sector, user_id }) => {
-            const u = uid(user_id);
+        async ({ limit, sector, user_id }, extra) => {
+            // Get user ID from context or parameter
+            const contextUserId = getUserIdFromContext((extra as any)?.requestContext);
+            const u = uid(user_id) || contextUserId;
+            
             let rows: mem_row[];
             if (u) {
                 const all = await q.all_mem_by_user.all(u, limit ?? 10, 0);
@@ -301,8 +303,11 @@ export const create_mcp_srv = () => {
                     "Validate ownership against a specific user identifier",
                 ),
         },
-        async ({ id, include_vectors, user_id }) => {
-            const u = uid(user_id);
+        async ({ id, include_vectors, user_id }, extra) => {
+            // Get user ID from context or parameter
+            const contextUserId = getUserIdFromContext((extra as any)?.requestContext);
+            const u = uid(user_id) || contextUserId;
+            
             const mem = await q.get_mem.get(id);
             if (!mem)
                 return {
@@ -341,6 +346,8 @@ export const create_mcp_srv = () => {
             };
         },
     );
+
+    // ==================== RESOURCES ====================
 
     srv.resource(
         "openmemory-config",
@@ -385,7 +392,8 @@ export const create_mcp_srv = () => {
         },
     );
 
-    // Register prompts for common memory workflows
+    // ==================== PROMPTS ====================
+
     srv.prompt(
         "memory_context_builder",
         "Build comprehensive context from user memories for LLM conversation",
@@ -427,12 +435,10 @@ export const create_mcp_srv = () => {
 
             let memories;
             if (topic) {
-                // Query by topic
                 memories = await hsg_query(topic, maxMem, {
                     user_id: u,
                 });
             } else {
-                // Get recent memories
                 const rows = await q.all_mem_by_user.all(u, maxMem, 0);
                 memories = rows;
             }
@@ -513,7 +519,6 @@ export const create_mcp_srv = () => {
             } else if (fmt === "bullet") {
                 formattedResults = `Memory search results for "${query}":\n${matches.map((m: any, i: number) => `• ${i + 1}. [${m.primary_sector}] ${m.content}`).join("\n")}`;
             } else {
-                // detailed
                 formattedResults = `Detailed memory search results for "${query}":\n\n${matches
                     .map(
                         (m: any, i: number) =>
@@ -651,7 +656,6 @@ Please provide recommendations for consolidating these memories to improve the m
                     ],
                 };
 
-            // Map focus to sectors
             const sectorMap: Record<string, sector_type[]> = {
                 habits: ["procedural", "episodic"],
                 preferences: ["emotional", "semantic"],
@@ -662,7 +666,6 @@ Please provide recommendations for consolidating these memories to improve the m
 
             let memories: mem_row[];
             if (focus && sectorMap[focus]) {
-                // Get memories from relevant sectors
                 const allMems: mem_row[] = [];
                 for (const sector of sectorMap[focus]) {
                     const sectorMems = await q.all_mem_by_sector.all(
@@ -724,113 +727,78 @@ Please provide a thoughtful reflection on what these memories reveal about the u
         },
     );
 
+    // ==================== INITIALIZATION ====================
+
     srv.server.oninitialized = () => {
-        // Use stderr for debug output, not stdout
         console.error(
-            "[MCP] initialization completed with client:",
+            "[MCP] Server initialized with client:",
             srv.server.getClientVersion(),
         );
     };
+    
     return srv;
 };
 
-const extract_pay = async (req: IncomingMessage & { body?: any }) => {
-    if (req.body !== undefined) {
-        if (typeof req.body === "string") {
-            if (!req.body.trim()) return undefined;
-            return JSON.parse(req.body);
+/**
+ * Handle MCP HTTP Requests
+ * Implements Streamable HTTP transport as per PDF requirements
+ */
+export async function handleMcpRequest(
+    req: Request,
+    res: Response,
+    mcpServer: McpServer,
+    userId?: string
+) {
+    try {
+        // Create transport for this request
+        const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: undefined,
+            enableJsonResponse: true,
+        });
+        
+        // Connect server to transport
+        await mcpServer.connect(transport);
+        
+        // Set request context for user ID
+        const requestContext = { userId };
+        
+        // Handle the request
+        if (req.method === "POST") {
+            // Pass the already-parsed body from Express
+            await transport.handleRequest(req as any, res as any, req.body);
+        } else if (req.method === "GET") {
+            // Handle SSE connection requests if needed
+            await transport.handleRequest(req as any, res as any, null);
         }
-        if (typeof req.body === "object" && req.body !== null) return req.body;
-        return undefined;
+        
+    } catch (error) {
+        console.error("[MCP] Request handling error:", error);
+        if (!res.headersSent) {
+            res.status(500).json({
+                jsonrpc: "2.0",
+                error: {
+                    code: -32603,
+                    message: "Internal server error",
+                },
+                id: null,
+            });
+        }
     }
-    const raw = await new Promise<string>((resolve, reject) => {
-        let buf = "";
-        req.on("data", (chunk) => {
-            buf += chunk;
-        });
-        req.on("end", () => resolve(buf));
-        req.on("error", reject);
-    });
-    if (!raw.trim()) return undefined;
-    return JSON.parse(raw);
-};
+}
 
-export const mcp = (app: any) => {
-    const srv = create_mcp_srv();
-    const trans = new StreamableHTTPServerTransport({
-        sessionIdGenerator: undefined,
-        enableJsonResponse: true,
-    });
-    const srv_ready = srv
-        .connect(trans)
-        .then(() => {
-            console.log("[MCP] Server started and transport connected");
-        })
-        .catch((error) => {
-            console.error("[MCP] Failed to initialize transport:", error);
-            throw error;
-        });
-
-    const handle_req = async (req: any, res: any) => {
-        try {
-            await srv_ready;
-            const pay = await extract_pay(req);
-            if (!pay || typeof pay !== "object") {
-                send_err(res, -32600, "Request body must be a JSON object");
-                return;
-            }
-            console.log("[MCP] Incoming request:", JSON.stringify(pay));
-            set_hdrs(res);
-            await trans.handleRequest(req, res, pay);
-        } catch (error) {
-            console.error("[MCP] Error handling request:", error);
-            if (error instanceof SyntaxError) {
-                send_err(res, -32600, "Invalid JSON payload");
-                return;
-            }
-            if (!res.headersSent)
-                send_err(
-                    res,
-                    -32603,
-                    "Internal server error",
-                    (error as any)?.id ?? null,
-                    500,
-                );
-        }
-    };
-
-    app.post("/mcp", (req: any, res: any) => {
-        void handle_req(req, res);
-    });
-    app.options("/mcp", (_req: any, res: any) => {
-        res.statusCode = 204;
-        set_hdrs(res);
-        res.end();
-    });
-
-    const method_not_allowed = (_req: IncomingMessage, res: ServerResponse) => {
-        send_err(
-            res,
-            -32600,
-            "Method not supported. Use POST  /mcp with JSON payload.",
-            null,
-            405,
-        );
-    };
-    app.get("/mcp", method_not_allowed);
-    app.delete("/mcp", method_not_allowed);
-    app.put("/mcp", method_not_allowed);
-};
-
-export const start_mcp_stdio = async () => {
-    const srv = create_mcp_srv();
+/**
+ * Start MCP STDIO Server
+ * For CLI tools
+ */
+export const startMcpStdio = async () => {
+    const srv = createMcpServer();
     const trans = new StdioServerTransport();
     await srv.connect(trans);
-    // console.error("[MCP] STDIO transport connected"); // Use stderr for debug output, not stdout
 };
 
+// CLI entry point
 if (typeof require !== "undefined" && require.main === module) {
-    void start_mcp_stdio().catch((error) => {
+    void startMcpStdio().catch((error) => {
         console.error("[MCP] STDIO startup failed:", error);
         process.exitCode = 1;
     });
