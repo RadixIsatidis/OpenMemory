@@ -1,4 +1,3 @@
-import express from "express";
 import { env, tier } from "../core/cfg";
 import { run_decay_process, prune_weak_waypoints } from "../memory/hsg";
 import { createMcpServer, handleMcpRequest } from "../ai/mcp";
@@ -11,6 +10,7 @@ import { start_reflection } from "../memory/reflect";
 import { start_user_summary_reflection } from "../memory/user_summary";
 import { sendTelemetry } from "../core/telemetry";
 import { req_tracker_mw } from "./routes/dashboard";
+import { createExpressServer } from "./express";
 
 const ASC = `   ____                   __  __                                 
   / __ \\                 |  \\/  |                                
@@ -21,8 +21,10 @@ const ASC = `   ____                   __  __
         | |                                                 __/ |
         |_|                                                |___/ `;
 
-// Create Express app
-const app = express();
+// Create Express app using factory
+const app = createExpressServer({
+    max_payload_size: env.max_payload_size,
+});
 
 console.log(ASC);
 console.log(`[CONFIG] Vector Dimension: ${env.vec_dim}`);
@@ -40,11 +42,6 @@ if (env.emb_kind !== "synthetic" && (tier === "hybrid" || tier === "fast")) {
 }
 
 // ==================== MIDDLEWARE ====================
-
-// Body parsers
-const payloadLimit = env.max_payload_size || 10_000_000;
-app.use(express.json({ limit: payloadLimit }));
-app.use(express.urlencoded({ extended: true, limit: payloadLimit }));
 
 // Request tracking
 app.use(req_tracker_mw());

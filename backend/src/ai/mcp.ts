@@ -16,6 +16,20 @@ import { j, p } from "../utils";
 import type { sector_type, mem_row } from "../core/types";
 import { update_user_summary } from "../memory/user_summary";
 
+/**
+ * Request context interface for MCP operations
+ */
+export interface McpRequestContext {
+    userId?: string;
+}
+
+/**
+ * Extended handler extra with our context
+ */
+export interface McpExtra {
+    requestContext?: McpRequestContext;
+}
+
 const sec_enum = z.enum([
     "episodic",
     "semantic",
@@ -50,7 +64,7 @@ const uid = (val?: string | null) => (val?.trim() ? val.trim() : undefined);
  * Extract user ID from request context
  * Implements multi-tenant isolation strategy from the PDF spec
  */
-function getUserIdFromContext(context: any): string {
+function getUserIdFromContext(context?: McpRequestContext): string {
     // Strategy 1: Use authenticated user from Bearer token mapping
     if (context?.userId) {
         return context.userId;
@@ -109,7 +123,7 @@ export const createMcpServer = () => {
         },
         async ({ query, k, sector, min_salience, user_id }, extra) => {
             // Get user ID from context or parameter
-            const contextUserId = getUserIdFromContext((extra as any)?.requestContext);
+            const contextUserId = getUserIdFromContext((extra as McpExtra)?.requestContext);
             const u = uid(user_id) || contextUserId;
             
             const flt =
@@ -173,7 +187,7 @@ export const createMcpServer = () => {
         },
         async ({ content, tags, metadata, user_id }, extra) => {
             // Get user ID from context or parameter
-            const contextUserId = getUserIdFromContext((extra as any)?.requestContext);
+            const contextUserId = getUserIdFromContext((extra as McpExtra)?.requestContext);
             const u = uid(user_id) || contextUserId;
             
             const res = await add_hsg_memory(
@@ -250,7 +264,7 @@ export const createMcpServer = () => {
         },
         async ({ limit, sector, user_id }, extra) => {
             // Get user ID from context or parameter
-            const contextUserId = getUserIdFromContext((extra as any)?.requestContext);
+            const contextUserId = getUserIdFromContext((extra as McpExtra)?.requestContext);
             const u = uid(user_id) || contextUserId;
             
             let rows: mem_row[];
@@ -305,7 +319,7 @@ export const createMcpServer = () => {
         },
         async ({ id, include_vectors, user_id }, extra) => {
             // Get user ID from context or parameter
-            const contextUserId = getUserIdFromContext((extra as any)?.requestContext);
+            const contextUserId = getUserIdFromContext((extra as McpExtra)?.requestContext);
             const u = uid(user_id) || contextUserId;
             
             const mem = await q.get_mem.get(id);
