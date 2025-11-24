@@ -435,6 +435,14 @@ OpenMemory ships with a **native MCP (Model Context Protocol) server**, making i
 
 These tools expose the cognitive engine’s recall, storage, listing, salience boosting, and sectorization.
 
+### Prompts Provided
+
+* `memory_context_builder` — Build comprehensive context from user memories for LLM conversation
+* `memory_search_assistant` — Search and format memories for specific queries
+* `memory_consolidation_prompt` — Generate prompt for reviewing and consolidating similar memories
+* `memory_reflection_prompt` — Generate reflective analysis of user's memory patterns
+
+These prompts enable AI-assisted memory workflows, context building, and pattern analysis. See [MCP_PROMPTS.md](backend/MCP_PROMPTS.md) for detailed documentation.
 ### Example Setup
 
 **Claude Desktop / Claude Code:**
