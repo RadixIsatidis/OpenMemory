@@ -82,7 +82,7 @@ export const create_mcp_srv = () => {
             name: "openmemory-mcp",
             version: "2.1.0",
         },
-        { capabilities: { tools: {}, resources: {}, logging: {} } },
+        { capabilities: { tools: {}, resources: {}, prompts: {}, logging: {} } },
     );
 
     srv.tool(
@@ -367,12 +367,357 @@ export const create_mcp_srv = () => {
                     "openmemory_list",
                     "openmemory_get",
                 ],
+                available_prompts: [
+                    "memory_context_builder",
+                    "memory_search_assistant",
+                    "memory_consolidation_prompt",
+                    "memory_reflection_prompt",
+                ],
             };
             return {
                 contents: [
                     {
                         uri: "openmemory://config",
                         text: JSON.stringify(pay, null, 2),
+                    },
+                ],
+            };
+        },
+    );
+
+    // Register prompts for common memory workflows
+    srv.prompt(
+        "memory_context_builder",
+        "Build comprehensive context from user memories for LLM conversation",
+        {
+            user_id: z
+                .string()
+                .trim()
+                .min(1)
+                .describe("User identifier to retrieve memories for"),
+            topic: z
+                .string()
+                .optional()
+                .describe("Optional topic to focus the context on"),
+            max_memories: z
+                .string()
+                .optional()
+                .describe(
+                    "Maximum number of memories to include (default: 10, max: 50)",
+                ),
+        },
+        async ({ user_id, topic, max_memories }) => {
+            const u = uid(user_id);
+            if (!u)
+                return {
+                    messages: [
+                        {
+                            role: "user",
+                            content: {
+                                type: "text",
+                                text: "Error: user_id is required",
+                            },
+                        },
+                    ],
+                };
+
+            const maxMem = max_memories
+                ? Math.min(Math.max(1, parseInt(max_memories, 10) || 10), 50)
+                : 10;
+
+            let memories;
+            if (topic) {
+                // Query by topic
+                memories = await hsg_query(topic, maxMem, {
+                    user_id: u,
+                });
+            } else {
+                // Get recent memories
+                const rows = await q.all_mem_by_user.all(u, maxMem, 0);
+                memories = rows;
+            }
+
+            const context = memories
+                .map(
+                    (m: any, idx: number) =>
+                        `${idx + 1}. [${m.primary_sector}] ${m.content}`,
+                )
+                .join("\n\n");
+
+            const promptText = topic
+                ? `Here is relevant context about ${topic} from user ${u}'s memory:\n\n${context}\n\nUse this context to provide informed responses.`
+                : `Here is recent context from user ${u}'s memory:\n\n${context}\n\nUse this context to provide personalized responses.`;
+
+            return {
+                messages: [
+                    {
+                        role: "user",
+                        content: {
+                            type: "text",
+                            text: promptText,
+                        },
+                    },
+                ],
+            };
+        },
+    );
+
+    srv.prompt(
+        "memory_search_assistant",
+        "Search and format memories for specific queries",
+        {
+            query: z.string().min(1).describe("Search query text"),
+            user_id: z
+                .string()
+                .trim()
+                .optional()
+                .describe("Optional user identifier to filter results"),
+            sector: z
+                .string()
+                .optional()
+                .describe(
+                    "Optional sector to filter results (episodic, semantic, procedural, emotional, reflective)",
+                ),
+            format: z
+                .string()
+                .optional()
+                .describe(
+                    "Output format preference: detailed, summary, or bullet (default: detailed)",
+                ),
+        },
+        async ({ query, user_id, sector, format }) => {
+            const u = uid(user_id);
+            const matches = await hsg_query(query, 10, {
+                ...(sector ? { sectors: [sector as sector_type] } : {}),
+                ...(u ? { user_id: u } : {}),
+            });
+
+            if (matches.length === 0) {
+                return {
+                    messages: [
+                        {
+                            role: "user",
+                            content: {
+                                type: "text",
+                                text: `No memories found matching "${query}".`,
+                            },
+                        },
+                    ],
+                };
+            }
+
+            const fmt = format || "detailed";
+            let formattedResults: string;
+            if (fmt === "summary") {
+                formattedResults = `Found ${matches.length} memories related to "${query}":\n\n${matches.map((m: any) => `- ${m.content.substring(0, 100)}...`).join("\n")}`;
+            } else if (fmt === "bullet") {
+                formattedResults = `Memory search results for "${query}":\n${matches.map((m: any, i: number) => `• ${i + 1}. [${m.primary_sector}] ${m.content}`).join("\n")}`;
+            } else {
+                // detailed
+                formattedResults = `Detailed memory search results for "${query}":\n\n${matches
+                    .map(
+                        (m: any, i: number) =>
+                            `${i + 1}. [${m.primary_sector}] Score: ${m.score.toFixed(3)}\n   Salience: ${m.salience.toFixed(3)}\n   Content: ${m.content}\n   Last seen: ${m.last_seen_at}`,
+                    )
+                    .join("\n\n")}`;
+            }
+
+            return {
+                messages: [
+                    {
+                        role: "user",
+                        content: {
+                            type: "text",
+                            text: formattedResults,
+                        },
+                    },
+                ],
+            };
+        },
+    );
+
+    srv.prompt(
+        "memory_consolidation_prompt",
+        "Generate prompt for reviewing and consolidating similar memories",
+        {
+            user_id: z
+                .string()
+                .trim()
+                .min(1)
+                .describe("User identifier to analyze memories for"),
+            sector: z
+                .string()
+                .optional()
+                .describe(
+                    "Optional sector to focus consolidation on (episodic, semantic, procedural, emotional, reflective)",
+                ),
+        },
+        async ({ user_id, sector }) => {
+            const u = uid(user_id);
+            if (!u)
+                return {
+                    messages: [
+                        {
+                            role: "user",
+                            content: {
+                                type: "text",
+                                text: "Error: user_id is required",
+                            },
+                        },
+                    ],
+                };
+
+            const rows = sector
+                ? await q.all_mem_by_sector.all(sector as sector_type, 50, 0)
+                : await q.all_mem_by_user.all(u, 50, 0);
+
+            const filtered = sector
+                ? rows.filter((r) => r.user_id === u)
+                : rows;
+
+            if (filtered.length === 0) {
+                return {
+                    messages: [
+                        {
+                            role: "user",
+                            content: {
+                                type: "text",
+                                text: `No memories found for consolidation${sector ? ` in ${sector} sector` : ""}.`,
+                            },
+                        },
+                    ],
+                };
+            }
+
+            const memoryList = filtered
+                .map(
+                    (m, i) =>
+                        `${i + 1}. [ID: ${m.id}] [${m.primary_sector}] Salience: ${m.salience.toFixed(3)}\n   ${m.content}`,
+                )
+                .join("\n\n");
+
+            const promptText = `Review these ${filtered.length} memories${sector ? ` from the ${sector} sector` : ""} and identify:
+1. Duplicate or highly similar memories that could be merged
+2. Memories that contradict each other and need resolution
+3. Memories that could be better organized or categorized
+
+Memories:
+${memoryList}
+
+Please provide recommendations for consolidating these memories to improve the memory system's efficiency and accuracy.`;
+
+            return {
+                messages: [
+                    {
+                        role: "user",
+                        content: {
+                            type: "text",
+                            text: promptText,
+                        },
+                    },
+                ],
+            };
+        },
+    );
+
+    srv.prompt(
+        "memory_reflection_prompt",
+        "Generate reflective analysis of user's memory patterns",
+        {
+            user_id: z
+                .string()
+                .trim()
+                .min(1)
+                .describe("User identifier to analyze"),
+            focus: z
+                .string()
+                .optional()
+                .describe(
+                    "Optional focus area for reflection: habits, preferences, knowledge, skills, or emotions",
+                ),
+        },
+        async ({ user_id, focus }) => {
+            const u = uid(user_id);
+            if (!u)
+                return {
+                    messages: [
+                        {
+                            role: "user",
+                            content: {
+                                type: "text",
+                                text: "Error: user_id is required",
+                            },
+                        },
+                    ],
+                };
+
+            // Map focus to sectors
+            const sectorMap: Record<string, sector_type[]> = {
+                habits: ["procedural", "episodic"],
+                preferences: ["emotional", "semantic"],
+                knowledge: ["semantic", "episodic"],
+                skills: ["procedural", "semantic"],
+                emotions: ["emotional", "reflective"],
+            };
+
+            let memories: mem_row[];
+            if (focus && sectorMap[focus]) {
+                // Get memories from relevant sectors
+                const allMems: mem_row[] = [];
+                for (const sector of sectorMap[focus]) {
+                    const sectorMems = await q.all_mem_by_sector.all(
+                        sector,
+                        20,
+                        0,
+                    );
+                    allMems.push(
+                        ...sectorMems.filter((m) => m.user_id === u),
+                    );
+                }
+                memories = allMems;
+            } else {
+                memories = await q.all_mem_by_user.all(u, 30, 0);
+            }
+
+            if (memories.length === 0) {
+                return {
+                    messages: [
+                        {
+                            role: "user",
+                            content: {
+                                type: "text",
+                                text: `No memories found for user ${u}${focus ? ` related to ${focus}` : ""}.`,
+                            },
+                        },
+                    ],
+                };
+            }
+
+            const memoryText = memories
+                .map(
+                    (m, i) =>
+                        `${i + 1}. [${m.primary_sector}] ${m.content} (salience: ${m.salience.toFixed(3)})`,
+                )
+                .join("\n");
+
+            const promptText = `Analyze these ${memories.length} memories for user ${u}${focus ? ` focusing on ${focus}` : ""} and provide:
+1. Key patterns and recurring themes
+2. Important insights about the user's ${focus || "behavior and preferences"}
+3. Suggestions for how this understanding can improve personalized interactions
+
+Memories:
+${memoryText}
+
+Please provide a thoughtful reflection on what these memories reveal about the user.`;
+
+            return {
+                messages: [
+                    {
+                        role: "user",
+                        content: {
+                            type: "text",
+                            text: promptText,
+                        },
                     },
                 ],
             };
