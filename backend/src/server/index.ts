@@ -74,23 +74,8 @@ app.use((err: any, req: any, res: any, next: any) => {
 // Request tracking
 app.use(req_tracker_mw());
 
-// CORS middleware
-app.use((req: any, res: any, next: any) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader(
-        "Access-Control-Allow-Methods",
-        "GET,POST,PUT,DELETE,OPTIONS",
-    );
-    res.setHeader(
-        "Access-Control-Allow-Headers",
-        "Content-Type,Authorization,x-api-key,Mcp-Session-Id,MCP-Protocol-Version,Origin",
-    );
-    if (req.method === "OPTIONS") {
-        res.status(200).end();
-        return;
-    }
-    next();
-});
+// Note: CORS headers are handled by Nginx reverse proxy
+// See nginx.conf for CORS configuration
 
 app.use(authenticate_api_request);
 

@@ -26,6 +26,102 @@ const sec_enum = z.enum([
     "reflective",
 ] as const);
 
+// Pre-define Zod schemas to avoid TypeScript type inference memory issues
+const QueryInputSchema = z.object({
+    query: z
+        .string()
+        .min(1, "query text is required")
+        .describe("Natural language search query or question to find relevant memories"),
+    k: z
+        .number()
+        .min(1)
+        .max(32)
+        .default(8)
+        .describe("Maximum number of results to return (1-32)"),
+    sector: sec_enum
+        .optional()
+        .describe("Restrict search to a specific sector"),
+    min_salience: z
+        .number()
+        .min(0)
+        .max(1)
+        .optional()
+        .describe("Minimum salience threshold"),
+    user_id: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe("Isolate results to a specific user identifier"),
+});
+
+const StoreInputSchema = z.object({
+    content: z.string().min(1).describe("The text content, information, or knowledge to remember and store"),
+    tags: z.array(z.string()).optional().describe("Optional tags for categorization and filtering"),
+    metadata: z
+        .record(z.any())
+        .optional()
+        .describe("Optional metadata object for additional structured information"),
+    user_id: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe("User identifier for multi-tenant isolation (optional, defaults to system user)"),
+});
+
+const ReinforceInputSchema = z.object({
+    id: z.string().min(1).describe("Unique identifier of the memory to reinforce"),
+    boost: z
+        .number()
+        .min(0.01)
+        .max(1)
+        .default(0.1)
+        .describe("Amount to increase salience by (0.01-1.0, default 0.1)"),
+});
+
+const ListInputSchema = z.object({
+    limit: z
+        .number()
+        .min(1)
+        .max(50)
+        .default(10)
+        .describe("Number of memories to return (1-50)"),
+    sector: sec_enum
+        .optional()
+        .describe("Filter by memory sector: episodic (events), semantic (facts), procedural (how-to), emotional (feelings), or reflective (insights)"),
+    user_id: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe("Filter memories for specific user (optional, for multi-tenant scenarios)"),
+});
+
+const GetInputSchema = z.object({
+    id: z.string().min(1).describe("Unique identifier of the memory to retrieve"),
+    include_vectors: z
+        .boolean()
+        .default(false)
+        .describe("Include detailed vector embedding information (optional, for advanced use)"),
+    user_id: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe("Verify user ownership before returning memory (optional, for multi-tenant scenarios)"),
+});
+
+const SearchPromptSchema = z.object({
+    query: z.string().min(1).describe("Search query text"),
+    max_results: z.string().optional().describe("Maximum number of results (default: 5)"),
+});
+
+const ContextPromptSchema = z.object({
+    topic: z.string().optional().describe("Optional topic to focus on"),
+    max_memories: z.string().optional().describe("Maximum memories to include (default: 10)"),
+});
+
 const trunc = (val: string, max = 200) =>
     val.length <= max ? val : `${val.slice(0, max).trimEnd()}...`;
 
@@ -48,12 +144,7 @@ const fmt_matches = (matches: Awaited<ReturnType<typeof hsg_query>>) =>
 
 const set_hdrs = (res: ServerResponse) => {
     res.setHeader("Content-Type", "application/json");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "POST,GET,DELETE,OPTIONS");
-    res.setHeader(
-        "Access-Control-Allow-Headers",
-        "Content-Type,Authorization,Mcp-Session-Id,MCP-Protocol-Version,Origin",
-    );
+    // Note: CORS headers are handled by Nginx reverse proxy
 };
 
 const send_err = (
@@ -87,37 +178,14 @@ export const create_mcp_srv = () => {
         { capabilities: { tools: {}, resources: {}, prompts: {}, logging: {} } },
     );
 
-    srv.tool(
+    (srv as any).registerTool(
         "openmemory_query",
-        "Search and retrieve memories using semantic similarity. Returns relevant memories ranked by similarity score, useful for finding information, context, or related knowledge from the memory system.",
         {
-            query: z
-                .string()
-                .min(1, "query text is required")
-                .describe("Natural language search query or question to find relevant memories"),
-            k: z
-                .number()
-                .min(1)
-                .max(32)
-                .default(8)
-                .describe("Maximum number of results to return (1-32)"),
-            sector: sec_enum
-                .optional()
-                .describe("Restrict search to a specific sector"),
-            min_salience: z
-                .number()
-                .min(0)
-                .max(1)
-                .optional()
-                .describe("Minimum salience threshold"),
-            user_id: z
-                .string()
-                .trim()
-                .min(1)
-                .optional()
-                .describe("Isolate results to a specific user identifier"),
+            description: "Search and retrieve memories using semantic similarity. Returns relevant memories ranked by similarity score, useful for finding information, context, or related knowledge from the memory system.",
+            inputSchema: QueryInputSchema,
         },
-        async ({ query, k, sector, min_salience, user_id }) => {
+        async (args: any) => {
+            const { query, k = 8, sector, min_salience, user_id } = args;
             const u = uid(user_id);
             const flt =
                 sector || min_salience !== undefined || u
@@ -157,26 +225,14 @@ export const create_mcp_srv = () => {
         },
     );
 
-    srv.tool(
+    (srv as any).registerTool(
         "openmemory_store",
-        "Store new information, facts, or knowledge into OpenMemory for future retrieval. Creates a new memory entry that can be searched and retrieved later. Automatically classifies content into appropriate memory sectors (episodic, semantic, procedural, emotional, reflective).",
         {
-            content: z.string().min(1).describe("The text content, information, or knowledge to remember and store"),
-            tags: z.array(z.string()).optional().describe("Optional tags for categorization and filtering"),
-            metadata: z
-                .record(z.any())
-                .optional()
-                .describe("Optional metadata object for additional structured information"),
-            user_id: z
-                .string()
-                .trim()
-                .min(1)
-                .optional()
-                .describe(
-                    "User identifier for multi-tenant isolation (optional, defaults to system user)",
-                ),
+            description: "Store new information, facts, or knowledge into OpenMemory for future retrieval. Creates a new memory entry that can be searched and retrieved later. Automatically classifies content into appropriate memory sectors (episodic, semantic, procedural, emotional, reflective).",
+            inputSchema: StoreInputSchema,
         },
-        async ({ content, tags, metadata, user_id }) => {
+        async (args: any) => {
+            const { content, tags, metadata, user_id } = args;
             const u = uid(user_id);
             const res = await add_hsg_memory(
                 content,
@@ -204,19 +260,14 @@ export const create_mcp_srv = () => {
         },
     );
 
-    srv.tool(
+    (srv as any).registerTool(
         "openmemory_reinforce",
-        "Increase the importance (salience) of an existing memory, making it more likely to be retrieved in future searches. Use this when a memory proves valuable or needs to be prioritized.",
         {
-            id: z.string().min(1).describe("Unique identifier of the memory to reinforce"),
-            boost: z
-                .number()
-                .min(0.01)
-                .max(1)
-                .default(0.1)
-                .describe("Amount to increase salience by (0.01-1.0, default 0.1)"),
+            description: "Increase the importance (salience) of an existing memory, making it more likely to be retrieved in future searches. Use this when a memory proves valuable or needs to be prioritized.",
+            inputSchema: ReinforceInputSchema,
         },
-        async ({ id, boost }) => {
+        async (args: any) => {
+            const { id, boost = 0.1 } = args;
             await reinforce_memory(id, boost);
             return {
                 content: [
@@ -229,27 +280,14 @@ export const create_mcp_srv = () => {
         },
     );
 
-    srv.tool(
+    (srv as any).registerTool(
         "openmemory_list",
-        "List and browse recent memories stored in the system. Returns a paginated list of memories sorted by recency, useful for reviewing what has been stored or finding specific information.",
         {
-            limit: z
-                .number()
-                .min(1)
-                .max(50)
-                .default(10)
-                .describe("Number of memories to return (1-50)"),
-            sector: sec_enum
-                .optional()
-                .describe("Filter by memory sector: episodic (events), semantic (facts), procedural (how-to), emotional (feelings), or reflective (insights)"),
-            user_id: z
-                .string()
-                .trim()
-                .min(1)
-                .optional()
-                .describe("Filter memories for specific user (optional, for multi-tenant scenarios)"),
+            description: "List and browse recent memories stored in the system. Returns a paginated list of memories sorted by recency, useful for reviewing what has been stored or finding specific information.",
+            inputSchema: ListInputSchema,
         },
-        async ({ limit, sector, user_id }) => {
+        async (args: any) => {
+            const { limit = 10, sector, user_id } = args;
             const u = uid(user_id);
             let rows: mem_row[];
             if (u) {
@@ -283,25 +321,14 @@ export const create_mcp_srv = () => {
         },
     );
 
-    srv.tool(
+    (srv as any).registerTool(
         "openmemory_get",
-        "Retrieve detailed information about a specific memory by its unique identifier. Returns the complete memory object including content, metadata, timestamps, and optionally vector embeddings.",
         {
-            id: z.string().min(1).describe("Unique identifier of the memory to retrieve"),
-            include_vectors: z
-                .boolean()
-                .default(false)
-                .describe("Include detailed vector embedding information (optional, for advanced use)"),
-            user_id: z
-                .string()
-                .trim()
-                .min(1)
-                .optional()
-                .describe(
-                    "Verify user ownership before returning memory (optional, for multi-tenant scenarios)",
-                ),
+            description: "Retrieve detailed information about a specific memory by its unique identifier. Returns the complete memory object including content, metadata, timestamps, and optionally vector embeddings.",
+            inputSchema: GetInputSchema,
         },
-        async ({ id, include_vectors, user_id }) => {
+        async (args: any) => {
+            const { id, include_vectors = false, user_id } = args;
             const u = uid(user_id);
             const mem = await q.get_mem.get(id);
             if (!mem)
@@ -384,24 +411,24 @@ export const create_mcp_srv = () => {
     );
 
     // ==================== PROMPTS ====================
-    
-    srv.prompt(
+
+    (srv as any).registerPrompt(
         "memory_search",
-        "Search memories and format results for LLM consumption",
         {
-            query: z.string().min(1).describe("Search query text"),
-            max_results: z.string().optional().describe("Maximum number of results (default: 5)"),
+            description: "Search memories and format results for LLM consumption",
+            argsSchema: SearchPromptSchema.shape,
         },
-        async ({ query, max_results }) => {
-            const limit = max_results ? Math.min(parseInt(max_results) || 5, 20) : 5;
+        async (args: any) => {
+            const { query, max_results } = args;
+            const limit = max_results ? parseInt(max_results, 10) : 5;
             const results = await hsg_query(query, limit);
-            
+
             const formatted = results.length > 0
-                ? results.map((m: any, i: number) => 
+                ? results.map((m: any, i: number) =>
                     `${i + 1}. [${m.primary_sector}] (score: ${m.score.toFixed(3)})\n${m.content}`
                   ).join('\n\n')
                 : 'No relevant memories found.';
-            
+
             return {
                 messages: [
                     {
@@ -415,17 +442,17 @@ export const create_mcp_srv = () => {
             };
         }
     );
-    
-    srv.prompt(
+
+    (srv as any).registerPrompt(
         "memory_context",
-        "Build context from recent memories for conversation",
         {
-            topic: z.string().optional().describe("Optional topic to focus on"),
-            max_memories: z.string().optional().describe("Maximum memories to include (default: 10)"),
+            description: "Build context from recent memories for conversation",
+            argsSchema: ContextPromptSchema.shape,
         },
-        async ({ topic, max_memories }) => {
+        async (args: any) => {
+            const { topic, max_memories } = args;
             const limit = max_memories ? Math.min(parseInt(max_memories) || 10, 30) : 10;
-            
+
             let memories;
             if (topic) {
                 memories = await hsg_query(topic, limit);
@@ -433,15 +460,15 @@ export const create_mcp_srv = () => {
                 const rows = await q.all_mem.all(limit, 0);
                 memories = rows;
             }
-            
+
             const context = memories
                 .map((m: any, i: number) => `${i + 1}. ${m.content}`)
                 .join('\n');
-            
-            const message = topic 
+
+            const message = topic
                 ? `Relevant context about "${topic}":\n\n${context}`
                 : `Recent memory context:\n\n${context}`;
-            
+
             return {
                 messages: [
                     {
@@ -489,10 +516,10 @@ const extract_pay = async (req: IncomingMessage & { body?: any }) => {
 
 export const mcp = (app: any) => {
     const srv = create_mcp_srv();
-    
+
     // Session management: store active transports by session ID
     const transports: Record<string, StreamableHTTPServerTransport> = {};
-    
+
     // Configuration: Origin whitelist (configurable via environment)
     const allowed_origins = process.env.OM_MCP_ALLOWED_ORIGINS
         ? process.env.OM_MCP_ALLOWED_ORIGINS.split(',')
@@ -502,47 +529,47 @@ export const mcp = (app: any) => {
             'https://localhost',
             'https://127.0.0.1',
         ];
-    
+
     // Configuration: Enable authentication (optional, via environment)
     const require_auth = process.env.OM_MCP_REQUIRE_AUTH === 'true';
     const auth_token = process.env.OM_MCP_AUTH_TOKEN;
-    
+
     // Configuration: Log level (error, warn, info, debug)
     const log_level = process.env.OM_MCP_LOG_LEVEL || 'info';
     const should_log = (level: 'error' | 'warn' | 'info' | 'debug') => {
         const levels = ['error', 'warn', 'info', 'debug'];
         return levels.indexOf(level) <= levels.indexOf(log_level as any);
     };
-    
+
     // Security: validate Origin header to prevent DNS rebinding attacks
     const validate_origin = (req: any): boolean => {
         const origin = req.headers.origin;
         if (!origin) return true; // Allow requests without Origin (e.g., from CLI tools)
-        
+
         return allowed_origins.some(prefix => origin.startsWith(prefix));
     };
-    
+
     // Security: validate authentication token
     const validate_auth = (req: any): boolean => {
         if (!require_auth) return true; // Auth disabled
         if (!auth_token) return true; // No token configured
-        
+
         const auth_header = req.headers['authorization'];
         if (!auth_header) return false;
-        
+
         // Support both "Bearer <token>" and direct token
         const token = auth_header.startsWith('Bearer ')
             ? auth_header.slice(7)
             : auth_header;
-        
+
         return token === auth_token;
     };
-    
+
     // Security: validate MCP protocol version
     const validate_protocol_version = (req: any): boolean => {
         const version = req.headers['mcp-protocol-version'];
         if (!version) return true; // Allow requests without version for backwards compatibility
-        
+
         const supported = ['2025-03-26', '2025-06-18'];
         return supported.includes(version);
     };
@@ -557,7 +584,7 @@ export const mcp = (app: any) => {
                 send_err(res, -32600, "Invalid Origin header", null, 403);
                 return;
             }
-            
+
             // Security: validate authentication token
             if (!validate_auth(req)) {
                 if (should_log('warn')) {
@@ -566,7 +593,7 @@ export const mcp = (app: any) => {
                 send_err(res, -32600, "Authentication required", null, 401);
                 return;
             }
-            
+
             // Security: validate MCP protocol version
             if (!validate_protocol_version(req)) {
                 if (should_log('warn')) {
@@ -575,16 +602,16 @@ export const mcp = (app: any) => {
                 send_err(res, -32600, "Unsupported MCP protocol version", null, 400);
                 return;
             }
-            
+
             const pay = await extract_pay(req);
             if (!pay || typeof pay !== "object") {
                 send_err(res, -32600, "Request body must be a JSON object");
                 return;
             }
-            
+
             const sessionId = req.headers['mcp-session-id'] as string | undefined;
             let transport: StreamableHTTPServerTransport;
-            
+
             // Session management: reuse existing session or create new one
             if (sessionId && transports[sessionId]) {
                 // Reuse existing session transport
@@ -610,7 +637,7 @@ export const mcp = (app: any) => {
                         }
                     },
                 });
-                
+
                 // Resource cleanup: remove transport when connection closes
                 transport.onclose = () => {
                     if (transport.sessionId) {
@@ -620,7 +647,7 @@ export const mcp = (app: any) => {
                         }
                     }
                 };
-                
+
                 // Connect server to new transport
                 await srv.connect(transport);
                 if (should_log('info')) {
@@ -631,12 +658,12 @@ export const mcp = (app: any) => {
                 send_err(res, -32000, "Invalid session: missing or invalid session ID for non-initialize request", null, 400);
                 return;
             }
-            
+
             if (should_log('debug')) {
                 console.error("[MCP] Processing request:", pay.method);
             }
             set_hdrs(res);
-            
+
             // Resource cleanup: close transport when response finishes
             res.on('close', () => {
                 if (!transport.sessionId) {
@@ -646,7 +673,7 @@ export const mcp = (app: any) => {
                     });
                 }
             });
-            
+
             await transport.handleRequest(req, res, pay);
         } catch (error) {
             console.error("[MCP] Error handling request:", error);
@@ -668,7 +695,7 @@ export const mcp = (app: any) => {
     app.post("/mcp", (req: any, res: any) => {
         void handle_req(req, res);
     });
-    
+
     // GET /mcp: Support SSE streams for server-initiated messages
     app.get("/mcp", async (req: any, res: any) => {
         try {
@@ -677,15 +704,15 @@ export const mcp = (app: any) => {
                 send_err(res, -32600, "Invalid Origin header", null, 403);
                 return;
             }
-            
+
             const sessionId = req.headers['mcp-session-id'] as string;
             const transport = transports[sessionId];
-            
+
             if (!transport) {
                 send_err(res, -32000, "Invalid session ID", null, 400);
                 return;
             }
-            
+
             if (should_log('debug')) {
                 console.error("[MCP] GET request for session:", sessionId);
             }
@@ -698,26 +725,26 @@ export const mcp = (app: any) => {
             }
         }
     });
-    
+
     // DELETE /mcp: Support explicit session termination
     app.delete("/mcp", async (req: any, res: any) => {
         try {
             const sessionId = req.headers['mcp-session-id'] as string;
             const transport = transports[sessionId];
-            
+
             if (!transport) {
                 send_err(res, -32000, "Invalid session ID", null, 404);
                 return;
             }
-            
+
             if (should_log('info')) {
                 console.error("[MCP] DELETE request for session:", sessionId);
             }
-            
+
             // Close and cleanup session
             await transport.close();
             delete transports[sessionId];
-            
+
             res.statusCode = 200;
             set_hdrs(res);
             res.end(JSON.stringify({ jsonrpc: "2.0", result: { success: true }, id: null }));
@@ -728,13 +755,13 @@ export const mcp = (app: any) => {
             }
         }
     });
-    
+
     app.options("/mcp", (_req: any, res: any) => {
         res.statusCode = 204;
         set_hdrs(res);
         res.end();
     });
-    
+
     app.put("/mcp", (_req: any, res: any) => {
         send_err(res, -32600, "Method not supported. Use POST /mcp with JSON payload.", null, 405);
     });
