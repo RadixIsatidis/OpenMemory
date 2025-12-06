@@ -43,8 +43,33 @@ if (env.emb_kind !== "synthetic" && (tier === "hybrid" || tier === "fast")) {
 
 // Body parsing middleware (critical for MCP)
 const payloadLimit = env.max_payload_size || 10_000_000;
-app.use(express.json({ limit: payloadLimit }));
+app.use(express.json({ 
+    limit: payloadLimit,
+    // Handle JSON parsing errors gracefully
+    verify: (req: any, res: any, buf: Buffer, encoding: string) => {
+        try {
+            JSON.parse(buf.toString());
+        } catch (e) {
+            throw new SyntaxError('Invalid JSON payload');
+        }
+    }
+}));
 app.use(express.urlencoded({ extended: true, limit: payloadLimit }));
+
+// JSON parsing error handler
+app.use((err: any, req: any, res: any, next: any) => {
+    if (err instanceof SyntaxError && 'body' in err) {
+        return res.status(400).json({
+            jsonrpc: "2.0",
+            error: {
+                code: -32700,
+                message: "Parse error: Invalid JSON"
+            },
+            id: null
+        });
+    }
+    next(err);
+});
 
 // Request tracking
 app.use(req_tracker_mw());

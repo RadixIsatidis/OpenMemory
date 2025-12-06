@@ -82,7 +82,7 @@ export const create_mcp_srv = () => {
             name: "openmemory-mcp",
             version: "2.1.0",
         },
-        { capabilities: { tools: {}, resources: {}, logging: {} } },
+        { capabilities: { tools: {}, resources: {}, prompts: {}, logging: {} } },
     );
 
     srv.tool(
@@ -365,6 +365,10 @@ export const create_mcp_srv = () => {
                     "openmemory_list",
                     "openmemory_get",
                 ],
+                available_prompts: [
+                    "memory_search",
+                    "memory_context",
+                ],
             };
             return {
                 contents: [
@@ -375,6 +379,79 @@ export const create_mcp_srv = () => {
                 ],
             };
         },
+    );
+
+    // ==================== PROMPTS ====================
+    
+    srv.prompt(
+        "memory_search",
+        "Search memories and format results for LLM consumption",
+        {
+            query: z.string().min(1).describe("Search query text"),
+            max_results: z.string().optional().describe("Maximum number of results (default: 5)"),
+        },
+        async ({ query, max_results }) => {
+            const limit = max_results ? Math.min(parseInt(max_results) || 5, 20) : 5;
+            const results = await hsg_query(query, limit);
+            
+            const formatted = results.length > 0
+                ? results.map((m: any, i: number) => 
+                    `${i + 1}. [${m.primary_sector}] (score: ${m.score.toFixed(3)})\n${m.content}`
+                  ).join('\n\n')
+                : 'No relevant memories found.';
+            
+            return {
+                messages: [
+                    {
+                        role: "user",
+                        content: {
+                            type: "text",
+                            text: `Search results for "${query}":\n\n${formatted}`
+                        }
+                    }
+                ]
+            };
+        }
+    );
+    
+    srv.prompt(
+        "memory_context",
+        "Build context from recent memories for conversation",
+        {
+            topic: z.string().optional().describe("Optional topic to focus on"),
+            max_memories: z.string().optional().describe("Maximum memories to include (default: 10)"),
+        },
+        async ({ topic, max_memories }) => {
+            const limit = max_memories ? Math.min(parseInt(max_memories) || 10, 30) : 10;
+            
+            let memories;
+            if (topic) {
+                memories = await hsg_query(topic, limit);
+            } else {
+                const rows = await q.all_mem.all(limit, 0);
+                memories = rows;
+            }
+            
+            const context = memories
+                .map((m: any, i: number) => `${i + 1}. ${m.content}`)
+                .join('\n');
+            
+            const message = topic 
+                ? `Relevant context about "${topic}":\n\n${context}`
+                : `Recent memory context:\n\n${context}`;
+            
+            return {
+                messages: [
+                    {
+                        role: "user",
+                        content: {
+                            type: "text",
+                            text: message
+                        }
+                    }
+                ]
+            };
+        }
     );
 
     srv.server.oninitialized = () => {
@@ -465,7 +542,7 @@ export const mcp = (app: any) => {
         send_err(
             res,
             -32600,
-            "Method not supported. Use POST  /mcp with JSON payload.",
+            "Method not supported. Use POST /mcp with JSON payload.",
             null,
             405,
         );
