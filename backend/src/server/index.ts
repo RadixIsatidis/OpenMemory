@@ -83,7 +83,7 @@ app.use((req: any, res: any, next: any) => {
     );
     res.setHeader(
         "Access-Control-Allow-Headers",
-        "Content-Type,Authorization,x-api-key",
+        "Content-Type,Authorization,x-api-key,Mcp-Session-Id,MCP-Protocol-Version,Origin",
     );
     if (req.method === "OPTIONS") {
         res.status(200).end();
@@ -151,8 +151,11 @@ start_reflection();
 start_user_summary_reflection();
 
 console.log(`[SERVER] Starting on port ${env.port}`);
-app.listen(env.port, () => {
-    console.log(`[SERVER] Running on http://localhost:${env.port}`);
+// Bind to 127.0.0.1 for local security (prevents LAN scanning)
+// For production deployment, configure via environment or load balancer
+const host = process.env.OM_BIND_HOST || "127.0.0.1";
+app.listen(env.port, host, () => {
+    console.log(`[SERVER] Running on http://${host}:${env.port}`);
     sendTelemetry().catch(() => {
         // ignore telemetry failures
     });
