@@ -35,6 +35,10 @@ export const env = {
         | "auto",
     compression_min_length: num(process.env.OM_COMPRESSION_MIN_LENGTH, 100),
     emb_kind: str(process.env.OM_EMBEDDINGS, "synthetic"),
+    embedding_fallback: str(process.env.OM_EMBEDDING_FALLBACK, "synthetic")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
     embed_mode: str(process.env.OM_EMBED_MODE, "simple"),
     adv_embed_parallel: bool(process.env.OM_ADV_EMBED_PARALLEL),
     embed_delay_ms: num(process.env.OM_EMBED_DELAY_MS, 200),
@@ -69,7 +73,10 @@ export const env = {
         process.env.OM_METADATA_BACKEND,
         "sqlite",
     ).toLowerCase(),
-    vector_backend: str(process.env.OM_VECTOR_BACKEND, "sqlite").toLowerCase(),
+    vector_backend: str(process.env.OM_VECTOR_BACKEND, "postgres").toLowerCase(),
+    valkey_host: str(process.env.OM_VALKEY_HOST, "localhost"),
+    valkey_port: num(process.env.OM_VALKEY_PORT, 6379),
+    valkey_password: process.env.OM_VALKEY_PASSWORD,
     ide_mode: bool(process.env.OM_IDE_MODE),
     ide_allowed_origins: str(
         process.env.OM_IDE_ALLOWED_ORIGINS,

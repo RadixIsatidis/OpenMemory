@@ -107,11 +107,11 @@ export const sector_configs: Record<string, sector_cfg> = {
 };
 export const sectors = Object.keys(sector_configs);
 export const scoring_weights = {
-    similarity: 0.40,
+    similarity: 0.35,
     overlap: 0.20,
     waypoint: 0.15,
-    recency: 0.15,
-    tag_match: 0.10,
+    recency: 0.10,
+    tag_match: 0.20,
 };
 export const hybrid_params = {
     tau: 3,
@@ -242,10 +242,10 @@ export function classify_content(
     const confidence =
         primaryScore > 0
             ? Math.min(
-                  1.0,
-                  primaryScore /
-                      (primaryScore + (sortedScores[1]?.[1] || 0) + 1),
-              )
+                1.0,
+                primaryScore /
+                (primaryScore + (sortedScores[1]?.[1] || 0) + 1),
+            )
             : 0.2;
     return {
         primary: primaryScore > 0 ? primary : "semantic",
@@ -336,8 +336,18 @@ export function extract_essence(
         .map((s) => s.trim())
         .filter((s) => s.length > 10);
     if (sents.length === 0) return raw.slice(0, max_len);
-    const score_sent = (s: string): number => {
+    const score_sent = (s: string, idx: number): number => {
         let sc = 0;
+        // First sentence bonus - titles/headers are essential for retrieval
+        if (idx === 0) sc += 10;
+        // Second sentence often contains key context
+        if (idx === 1) sc += 5;
+        // Header/section markers (markdown or label-style)
+        if (/^#+\s/.test(s) || /^[A-Z][A-Z\s]+:/.test(s)) sc += 8;
+        // Colon-prefixed labels like "PROBLEM:", "SOLUTION:", "CONTEXT:"
+        if (/^[A-Z][a-z]+:/i.test(s)) sc += 6;
+        // Date patterns (ISO format)
+        if (/\d{4}-\d{2}-\d{2}/.test(s)) sc += 7;
         if (
             /\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d+/i.test(
                 s,
@@ -347,7 +357,7 @@ export function extract_essence(
         if (/\$\d+|\d+\s*(miles|dollars|years|months|km)/.test(s)) sc += 4;
         if (/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+/.test(s)) sc += 3;
         if (
-            /\b(bought|purchased|serviced|visited|went|got|received|paid|earned|learned|discovered|found|saw|met|completed|finished)\b/i.test(
+            /\b(bought|purchased|serviced|visited|went|got|received|paid|earned|learned|discovered|found|saw|met|completed|finished|fixed|implemented|created|updated|added|removed|resolved)\b/i.test(
                 s,
             )
         )
@@ -357,21 +367,42 @@ export function extract_essence(
         if (/\b(I|my|me)\b/.test(s)) sc += 1;
         return sc;
     };
-    const scored = sents.map((s) => ({ text: s, score: score_sent(s) }));
+    const scored = sents.map((s, idx) => ({ text: s, score: score_sent(s, idx), idx }));
     scored.sort((a, b) => b.score - a.score);
+    // Build result, ensuring first sentence is always included if space permits
     let comp = "";
-    for (const item of scored) {
-        const cand = comp ? `${comp}. ${item.text}` : item.text;
-        if (cand.length <= max_len) {
-            comp = cand;
-        } else if (comp.length < max_len * 0.7) {
-            const rem = max_len - comp.length - 2;
-            if (rem > 20) {
-                comp += ". " + item.text.slice(0, rem);
+    const firstSent = sents[0];
+    if (firstSent && firstSent.length <= max_len * 0.5) {
+        comp = firstSent;
+        const remaining = scored.filter((item) => item.idx !== 0);
+        for (const item of remaining) {
+            const cand = comp ? `${comp}. ${item.text}` : item.text;
+            if (cand.length <= max_len) {
+                comp = cand;
+            } else if (comp.length < max_len * 0.7) {
+                const rem = max_len - comp.length - 2;
+                if (rem > 20) {
+                    comp += ". " + item.text.slice(0, rem);
+                }
+                break;
+            } else {
+                break;
             }
-            break;
-        } else {
-            break;
+        }
+    } else {
+        for (const item of scored) {
+            const cand = comp ? `${comp}. ${item.text}` : item.text;
+            if (cand.length <= max_len) {
+                comp = cand;
+            } else if (comp.length < max_len * 0.7) {
+                const rem = max_len - comp.length - 2;
+                if (rem > 20) {
+                    comp += ". " + item.text.slice(0, rem);
+                }
+                break;
+            } else {
+                break;
+            }
         }
     }
     return comp || raw.slice(0, max_len);
@@ -407,6 +438,7 @@ export function compute_hybrid_score(
 }
 import {
     q,
+    vector_store,
     get_async,
     all_async,
     run_async,
@@ -425,7 +457,7 @@ export async function create_cross_sector_waypoints(
         await q.ins_waypoint.run(
             prim_id,
             `${prim_id}:${sec}`,
-            user_id || null,
+            user_id || "anonymous",
             wt,
             now,
             now,
@@ -433,7 +465,7 @@ export async function create_cross_sector_waypoints(
         await q.ins_waypoint.run(
             `${prim_id}:${sec}`,
             prim_id,
-            user_id || null,
+            user_id || "anonymous",
             wt,
             now,
             now,
@@ -490,13 +522,13 @@ export async function create_single_waypoint(
         await q.ins_waypoint.run(
             new_id,
             best.id,
-            user_id || null,
+            user_id || "anonymous",
             best.similarity,
             ts,
             ts,
         );
     } else {
-        await q.ins_waypoint.run(new_id, new_id, user_id || null, 1.0, ts, ts);
+        await q.ins_waypoint.run(new_id, new_id, user_id || "anonymous", 1.0, ts, ts);
     }
 }
 export async function create_inter_mem_waypoints(
@@ -508,16 +540,16 @@ export async function create_inter_mem_waypoints(
 ): Promise<void> {
     const thresh = 0.75;
     const wt = 0.5;
-    const vecs = await q.get_vecs_by_sector.all(prim_sec);
+    const vecs = await vector_store.getVectorsBySector(prim_sec);
     for (const vr of vecs) {
         if (vr.id === new_id) continue;
-        const ex_vec = buf_to_vec(vr.v);
-        const sim = cos_sim(new Float32Array(new_vec), ex_vec);
+        const ex_vec = vr.vector;
+        const sim = cos_sim(new Float32Array(new_vec), new Float32Array(ex_vec));
         if (sim >= thresh) {
             await q.ins_waypoint.run(
                 new_id,
                 vr.id,
-                user_id || null,
+                user_id || "anonymous",
                 wt,
                 ts,
                 ts,
@@ -525,7 +557,7 @@ export async function create_inter_mem_waypoints(
             await q.ins_waypoint.run(
                 vr.id,
                 new_id,
-                user_id || null,
+                user_id || "anonymous",
                 wt,
                 ts,
                 ts,
@@ -550,7 +582,7 @@ export async function create_contextual_waypoints(
             await q.ins_waypoint.run(
                 mem_id,
                 rel_id,
-                user_id || null,
+                user_id || "anonymous",
                 base_wt,
                 now,
                 now,
@@ -613,6 +645,7 @@ export async function prune_weak_waypoints(): Promise<number> {
 }
 import {
     embedForSector,
+    embedQueryForAllSectors,
     embedMultiSector,
     cosineSimilarity,
     bufferToVector,
@@ -641,7 +674,7 @@ export async function calc_multi_vec_fusion_score(
     qe: Record<string, number[]>,
     w: multi_vec_fusion_weights,
 ): Promise<number> {
-    const vecs = await q.get_vecs_by_id.all(mid);
+    const vecs = await vector_store.getVectorsById(mid);
     let sum = 0,
         tot = 0;
     const wm: Record<string, number> = {
@@ -654,7 +687,7 @@ export async function calc_multi_vec_fusion_score(
     for (const v of vecs) {
         const qv = qe[v.sector];
         if (!qv) continue;
-        const mv = bufferToVector(v.v);
+        const mv = v.vector;
         const sim = cosineSimilarity(qv, mv);
         const wgt = wm[v.sector] || 0.5;
         sum += sim * wgt;
@@ -664,23 +697,13 @@ export async function calc_multi_vec_fusion_score(
 }
 const cache = new Map<string, { r: hsg_q_result[]; t: number }>();
 const sal_cache = new Map<string, { s: number; t: number }>();
-const vec_cache = new Map<string, { v: number[]; t: number }>();
+// vec_cache removed
 const seg_cache = new Map<number, any[]>();
 const coact_buf: Array<[string, string]> = [];
 const TTL = 60000;
 const VEC_CACHE_MAX = 1000;
 let active_queries = 0;
-const get_vec = (id: string, v: Buffer): number[] => {
-    const ck = vec_cache.get(id);
-    if (ck && Date.now() - ck.t < TTL) return ck.v;
-    const vec = bufferToVector(v);
-    vec_cache.set(id, { v: vec, t: Date.now() });
-    if (vec_cache.size > VEC_CACHE_MAX) {
-        const first = vec_cache.keys().next().value;
-        if (first) vec_cache.delete(first);
-    }
-    return vec;
-};
+// get_vec removed
 const get_segment = async (seg: number): Promise<any[]> => {
     if (seg_cache.has(seg)) return seg_cache.get(seg)!;
     const rows = await q.get_mem_by_segment.all(seg);
@@ -711,8 +734,9 @@ setInterval(async () => {
                 1,
                 cur_wt + hybrid_params.eta * (1 - cur_wt) * temp_fact,
             );
-            await q.ins_waypoint.run(a, b, new_wt, wp?.created_at || now, now);
-        } catch (e) {}
+            const user_id = wp?.user_id || memA?.user_id || memB?.user_id || "anonymous";
+            await q.ins_waypoint.run(a, b, user_id, new_wt, wp?.created_at || now, now);
+        } catch (e) { }
     }
 }, 1000);
 const get_sal = async (id: string, def_sal: number): Promise<number> => {
@@ -755,8 +779,8 @@ export async function hsg_query(
             ss = [...sectors];
         }
         if (!ss.length) ss.push("semantic");
-        const qe: Record<string, number[]> = {};
-        for (const s of ss) qe[s] = await embedForSector(qt, s);
+        // Batch embed all sectors in one API call for faster queries
+        const qe = await embedQueryForAllSectors(qt, ss);
         const w: multi_vec_fusion_weights = {
             semantic_dimension_weight: qc.primary === "semantic" ? 1.2 : 0.8,
             emotional_dimension_weight: qc.primary === "emotional" ? 1.5 : 0.6,
@@ -772,15 +796,8 @@ export async function hsg_query(
         > = {};
         for (const s of ss) {
             const qv = qe[s];
-            const vecs = await q.get_vecs_by_sector.all(s);
-            const sims: Array<{ id: string; similarity: number }> = [];
-            for (const vr of vecs) {
-                const mv = get_vec(vr.id, vr.v);
-                const sim = cosineSimilarity(qv, mv);
-                sims.push({ id: vr.id, similarity: sim });
-            }
-            sims.sort((a, b) => b.similarity - a.similarity);
-            sr[s] = sims.slice(0, k * 3);
+            const results = await vector_store.searchSimilar(s, qv, k * 3);
+            sr[s] = results.map(r => ({ id: r.id, similarity: r.score }));
         }
         const all_sims = Object.values(sr).flatMap((r) =>
             r.slice(0, 8).map((x) => x.similarity),
@@ -872,7 +889,7 @@ export async function hsg_query(
                 keyword_boost,
                 tag_match,
             );
-            const msec = await q.get_vecs_by_id.all(mid);
+            const msec = await vector_store.getVectorsById(mid);
             const sl = msec.map((v) => v.sector);
             res.push({
                 id: mid,
@@ -962,7 +979,7 @@ export async function hsg_query(
         for (const r of top) {
             on_query_hit(r.id, r.primary_sector, (text) =>
                 embedForSector(text, r.primary_sector),
-            ).catch(() => {});
+            ).catch(() => { });
         }
 
         cache.set(h, { r: top, t: Date.now() });
@@ -1047,7 +1064,7 @@ export async function add_hsg_memory(
         );
         await q.ins_mem.run(
             id,
-            user_id || null,
+            user_id || "anonymous",
             cur_seg,
             stored_content,
             simhash,
@@ -1072,13 +1089,12 @@ export async function add_hsg_memory(
             use_chunking ? chunks : undefined,
         );
         for (const result of emb_res) {
-            const vec_buf = vectorToBuffer(result.vector);
-            await q.ins_vec.run(
+            await vector_store.storeVector(
                 id,
                 result.sector,
-                user_id || null,
-                vec_buf,
+                result.vector,
                 result.dim,
+                user_id || "anonymous",
             );
         }
         const mean_vec = calc_mean_vec(emb_res, all_sectors);
@@ -1136,7 +1152,7 @@ export async function update_memory(
                 classification.primary,
                 ...classification.additional,
             ];
-            await q.del_vec.run(id);
+            await vector_store.deleteVectors(id);
             const emb_res = await embedMultiSector(
                 id,
                 new_content,
@@ -1144,13 +1160,12 @@ export async function update_memory(
                 use_chunking ? chunks : undefined,
             );
             for (const result of emb_res) {
-                const vec_buf = vectorToBuffer(result.vector);
-                await q.ins_vec.run(
+                await vector_store.storeVector(
                     id,
                     result.sector,
-                    mem.user_id || null,
-                    vec_buf,
+                    result.vector,
                     result.dim,
+                    mem.user_id || "anonymous",
                 );
             }
             const mean_vec = calc_mean_vec(emb_res, all_sectors);

@@ -3,6 +3,9 @@ import { Pool, PoolClient } from "pg";
 import { env } from "./cfg";
 import fs from "node:fs";
 import path from "node:path";
+import { VectorStore } from "./vector_store";
+import { PostgresVectorStore } from "./vector/postgres";
+import { ValkeyVectorStore } from "./vector/valkey";
 
 type q_type = {
     ins_mem: { run: (...p: any[]) => Promise<void> };
@@ -26,13 +29,7 @@ type q_type = {
     get_max_segment: { get: () => Promise<any> };
     get_segments: { all: () => Promise<any[]> };
     get_mem_by_segment: { all: (segment: number) => Promise<any[]> };
-    ins_vec: { run: (...p: any[]) => Promise<void> };
-    get_vec: { get: (id: string, sector: string) => Promise<any> };
-    get_vecs_by_id: { all: (id: string) => Promise<any[]> };
-    get_vecs_by_sector: { all: (sector: string) => Promise<any[]> };
-    get_vecs_batch: { all: (ids: string[], sector: string) => Promise<any[]> };
-    del_vec: { run: (...p: any[]) => Promise<void> };
-    del_vec_sector: { run: (...p: any[]) => Promise<void> };
+    // Vector operations removed, use vector_store instead
     ins_waypoint: { run: (...p: any[]) => Promise<void> };
     get_neighbors: { all: (src: string) => Promise<any[]> };
     get_waypoints_by_src: { all: (src: string) => Promise<any[]> };
@@ -58,17 +55,25 @@ let transaction: {
     rollback: () => Promise<void>;
 };
 let q: q_type;
+let vector_store: VectorStore;
 let memories_table: string;
 
 const is_pg = env.metadata_backend === "postgres";
+
+// Convert SQLite-style ? placeholders to PostgreSQL $1, $2, $3 placeholders
+function convertPlaceholders(sql: string): string {
+    if (!is_pg) return sql;
+    let index = 1;
+    return sql.replace(/\?/g, () => `$${index++}`);
+}
 
 if (is_pg) {
     const ssl =
         process.env.OM_PG_SSL === "require"
             ? { rejectUnauthorized: false }
             : process.env.OM_PG_SSL === "disable"
-              ? false
-              : undefined;
+                ? false
+                : undefined;
     const db_name = process.env.OM_PG_DB || "openmemory";
     const pool = (db: string) =>
         new Pool({
@@ -90,7 +95,7 @@ if (is_pg) {
     const f = `"${sc}"."openmemory_memories_fts"`;
     const exec = async (sql: string, p: any[] = []) => {
         const c = cli || pg;
-        return (await c.query(sql, p)).rows;
+        return (await c.query(convertPlaceholders(sql), p)).rows;
     };
     run_async = async (sql, p = []) => {
         await exec(sql, p);
@@ -162,6 +167,9 @@ if (is_pg) {
             `create table if not exists "${sc}"."openmemory_users"(user_id text primary key,summary text,reflection_count integer default 0,created_at bigint,updated_at bigint)`,
         );
         await pg.query(
+            `create table if not exists "${sc}"."stats"(id serial primary key,type text not null,count integer default 1,ts bigint not null)`,
+        );
+        await pg.query(
             `create index if not exists openmemory_memories_sector_idx on ${m}(primary_sector)`,
         );
         await pg.query(
@@ -179,7 +187,26 @@ if (is_pg) {
         await pg.query(
             `create index if not exists openmemory_waypoints_user_idx on ${w}(user_id)`,
         );
+        await pg.query(
+            `create index if not exists openmemory_stats_ts_idx on "${sc}"."stats"(ts)`,
+        );
+        await pg.query(
+            `create index if not exists openmemory_stats_type_idx on "${sc}"."stats"(type)`,
+        );
+        await pg.query(
+            `create index if not exists openmemory_stats_type_idx on "${sc}"."stats"(type)`,
+        );
         ready = true;
+
+        // Initialize VectorStore
+        if (env.vector_backend === "valkey") {
+            vector_store = new ValkeyVectorStore();
+            console.log("[DB] Using Valkey VectorStore");
+        } else {
+            const vt = process.env.OM_VECTOR_TABLE || "openmemory_vectors";
+            vector_store = new PostgresVectorStore({ run_async, get_async, all_async }, v.replace(/"/g, ""));
+            console.log(`[DB] Using Postgres VectorStore with table: ${v}`);
+        }
     };
     init().catch((err) => {
         console.error("[DB] Init failed:", err);
@@ -294,47 +321,7 @@ if (is_pg) {
                     [segment],
                 ),
         },
-        ins_vec: {
-            run: (...p) =>
-                run_async(
-                    `insert into ${v}(id,sector,user_id,v,dim) values($1,$2,$3,$4,$5) on conflict(id,sector) do update set user_id=excluded.user_id,v=excluded.v,dim=excluded.dim`,
-                    p,
-                ),
-        },
-        get_vec: {
-            get: (id, sector) =>
-                get_async(`select v,dim from ${v} where id=$1 and sector=$2`, [
-                    id,
-                    sector,
-                ]),
-        },
-        get_vecs_by_id: {
-            all: (id) =>
-                all_async(`select sector,v,dim from ${v} where id=$1`, [id]),
-        },
-        get_vecs_by_sector: {
-            all: (sector) =>
-                all_async(`select id,v,dim from ${v} where sector=$1`, [
-                    sector,
-                ]),
-        },
-        get_vecs_batch: {
-            all: (ids: string[], sector: string) => {
-                if (!ids.length) return Promise.resolve([]);
-                const ph = ids.map((_, i) => `$${i + 2}`).join(",");
-                return all_async(
-                    `select id,v,dim from ${v} where sector=$1 and id in (${ph})`,
-                    [sector, ...ids],
-                );
-            },
-        },
-        del_vec: {
-            run: (...p) => run_async(`delete from ${v} where id=$1`, p),
-        },
-        del_vec_sector: {
-            run: (...p) =>
-                run_async(`delete from ${v} where id=$1 and sector=$2`, p),
-        },
+        // Vector operations removed
         ins_waypoint: {
             run: (...p) =>
                 run_async(
@@ -433,6 +420,8 @@ if (is_pg) {
     const dir = path.dirname(db_path);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const db = new sqlite3.Database(db_path);
+    // SQLite vector table name from env (default: "vectors" for backward compatibility)
+    const sqlite_vector_table = process.env.OM_VECTOR_TABLE || "vectors";
     db.serialize(() => {
         db.run("PRAGMA journal_mode=WAL");
         db.run("PRAGMA synchronous=NORMAL");
@@ -447,7 +436,7 @@ if (is_pg) {
             `create table if not exists memories(id text primary key,user_id text,segment integer default 0,content text not null,simhash text,primary_sector text not null,tags text,meta text,created_at integer,updated_at integer,last_seen_at integer,salience real,decay_lambda real,version integer default 1,mean_dim integer,mean_vec blob,compressed_vec blob,feedback_score real default 0)`,
         );
         db.run(
-            `create table if not exists vectors(id text not null,sector text not null,user_id text,v blob not null,dim integer not null,primary key(id,sector))`,
+            `create table if not exists ${sqlite_vector_table}(id text not null,sector text not null,user_id text,v blob not null,dim integer not null,primary key(id,sector))`,
         );
         db.run(
             `create table if not exists waypoints(src_id text,dst_id text not null,user_id text,weight real not null,created_at integer,updated_at integer,primary key(src_id,user_id))`,
@@ -483,7 +472,7 @@ if (is_pg) {
             "create index if not exists idx_memories_user on memories(user_id)",
         );
         db.run(
-            "create index if not exists idx_vectors_user on vectors(user_id)",
+            `create index if not exists idx_vectors_user on ${sqlite_vector_table}(user_id)`,
         );
         db.run(
             "create index if not exists idx_waypoints_src on waypoints(src_id)",
@@ -517,6 +506,9 @@ if (is_pg) {
         db.run(
             "create index if not exists idx_edges_validity on temporal_edges(valid_from,valid_to)",
         );
+        db.run(
+            "create index if not exists idx_edges_validity on temporal_edges(valid_from,valid_to)",
+        );
     });
     memories_table = "memories";
     const exec = (sql: string, p: any[] = []) =>
@@ -534,6 +526,26 @@ if (is_pg) {
     run_async = exec;
     get_async = one;
     all_async = many;
+
+    // Initialize VectorStore (SQLite fallback uses PostgresVectorStore logic but with SQLite db ops)
+    // Note: PostgresVectorStore uses SQL syntax which might be compatible with SQLite for simple things, 
+    // but `bytea` vs `blob` might differ.
+    // However, the interface implementation I wrote uses `run_async` etc.
+    // I should probably rename PostgresVectorStore to SqlVectorStore or similar if it supports both.
+    // For now, I'll use it for SQLite too as the SQL seems standard enough (except maybe bytea/blob handling in param binding).
+    // SQLite uses `blob`. Postgres uses `bytea`.
+    // The `PostgresVectorStore` implementation uses `vectorToBuffer` which returns a Buffer.
+    // `sqlite3` handles Buffer as BLOB. `pg` handles Buffer as bytea.
+    // So it should work.
+
+    if (env.vector_backend === "valkey") {
+        vector_store = new ValkeyVectorStore();
+        console.log("[DB] Using Valkey VectorStore");
+    } else {
+        vector_store = new PostgresVectorStore({ run_async, get_async, all_async }, sqlite_vector_table);
+        console.log(`[DB] Using SQLite VectorStore with table: ${sqlite_vector_table}`);
+    }
+
     transaction = {
         begin: () => exec("BEGIN TRANSACTION"),
         commit: () => exec("COMMIT"),
@@ -632,43 +644,7 @@ if (is_pg) {
                     [segment],
                 ),
         },
-        ins_vec: {
-            run: (...p) =>
-                exec(
-                    "insert into vectors(id,sector,user_id,v,dim) values(?,?,?,?,?)",
-                    p,
-                ),
-        },
-        get_vec: {
-            get: (id, sector) =>
-                one("select v,dim from vectors where id=? and sector=?", [
-                    id,
-                    sector,
-                ]),
-        },
-        get_vecs_by_id: {
-            all: (id) =>
-                many("select sector,v,dim from vectors where id=?", [id]),
-        },
-        get_vecs_by_sector: {
-            all: (sector) =>
-                many("select id,v,dim from vectors where sector=?", [sector]),
-        },
-        get_vecs_batch: {
-            all: (ids: string[], sector: string) => {
-                if (!ids.length) return Promise.resolve([]);
-                const ph = ids.map(() => "?").join(",");
-                return many(
-                    `select id,v,dim from vectors where sector=? and id in (${ph})`,
-                    [sector, ...ids],
-                );
-            },
-        },
-        del_vec: { run: (...p) => exec("delete from vectors where id=?", p) },
-        del_vec_sector: {
-            run: (...p) =>
-                exec("delete from vectors where id=? and sector=?", p),
-        },
+        // Vector operations removed
         ins_waypoint: {
             run: (...p) =>
                 exec(
@@ -766,14 +742,13 @@ export const log_maint_op = async (
     cnt = 1,
 ) => {
     try {
-        await run_async("insert into stats(type,count,ts) values(?,?,?)", [
-            type,
-            cnt,
-            Date.now(),
-        ]);
+        const sql = is_pg
+            ? `insert into "${process.env.OM_PG_SCHEMA || "public"}"."stats"(type,count,ts) values($1,$2,$3)`
+            : "insert into stats(type,count,ts) values(?,?,?)";
+        await run_async(sql, [type, cnt, Date.now()]);
     } catch (e) {
         console.error("[DB] Maintenance log error:", e);
     }
 };
 
-export { q, transaction, all_async, get_async, run_async, memories_table };
+export { q, transaction, all_async, get_async, run_async, memories_table, vector_store };

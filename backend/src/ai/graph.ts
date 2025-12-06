@@ -1,6 +1,6 @@
 import { env } from "../core/cfg";
 import { add_hsg_memory, hsg_query } from "../memory/hsg";
-import { q } from "../core/db";
+import { q, vector_store } from "../core/db";
 import { now, j } from "../utils";
 import type {
     lgm_store_req,
@@ -114,7 +114,7 @@ const hydrate_mem_row = async (
     path?: string[],
 ): Promise<hydrated_mem> => {
     const tags = safe_parse<string[]>(row.tags, []);
-    const vecs = await q.get_vecs_by_id.all(row.id);
+    const vecs = await vector_store.getVectorsById(row.id);
     const secs = vecs.map((v) => v.sector);
     const mem: hydrated_mem = {
         id: row.id,
@@ -173,6 +173,7 @@ const create_auto_refl = async (
         build_refl_content(p, stored.namespace),
         j(refl_tags),
         refl_meta,
+        p.user_id,
     );
     return {
         id: res.id,
@@ -195,7 +196,7 @@ export async function store_node_mem(p: lgm_store_req) {
     const sec = resolve_sector(node);
     const tag_list = build_tags(p.tags, node, ns, p.graph_id);
     const meta = build_meta(p, sec, ns);
-    const res = await add_hsg_memory(p.content, j(tag_list), meta);
+    const res = await add_hsg_memory(p.content, j(tag_list), meta, p.user_id);
     const stored = {
         id: res.id,
         node,
