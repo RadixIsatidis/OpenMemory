@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "http";
+import { once } from "events";
 import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -493,32 +494,19 @@ export const create_mcp_srv = () => {
     return srv;
 };
 
-const extract_pay = async (req: IncomingMessage & { body?: any }) => {
-    if (req.body !== undefined) {
-        if (typeof req.body === "string") {
-            if (!req.body.trim()) return undefined;
-            return JSON.parse(req.body);
-        }
-        if (typeof req.body === "object" && req.body !== null) return req.body;
-        return undefined;
-    }
-    const raw = await new Promise<string>((resolve, reject) => {
-        let buf = "";
-        req.on("data", (chunk) => {
-            buf += chunk;
-        });
-        req.on("end", () => resolve(buf));
-        req.on("error", reject);
+const extract_pay = async (req: any) => {
+    if (req.body) return req.body;
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => {
+        chunks.push(chunk);
     });
-    if (!raw.trim()) return undefined;
-    return JSON.parse(raw);
+    await once(req, "end");
+    const raw = Buffer.concat(chunks).toString("utf-8");
+    return raw.trim() ? JSON.parse(raw) : {};
 };
 
 export const mcp = (app: any) => {
     const srv = create_mcp_srv();
-
-    // Session management: store active transports by session ID
-    const transports: Record<string, StreamableHTTPServerTransport> = {};
 
     // Configuration: Origin whitelist (configurable via environment)
     const allowed_origins = process.env.OM_MCP_ALLOWED_ORIGINS
@@ -541,229 +529,101 @@ export const mcp = (app: any) => {
         return levels.indexOf(level) <= levels.indexOf(log_level as any);
     };
 
-    // Security: validate Origin header to prevent DNS rebinding attacks
+    // ==================== SECURITY & VALIDATION ====================
     const validate_origin = (req: any): boolean => {
         const origin = req.headers.origin;
-        if (!origin) return true; // Allow requests without Origin (e.g., from CLI tools)
-
+        if (!origin) return true;
         return allowed_origins.some(prefix => origin.startsWith(prefix));
     };
 
-    // Security: validate authentication token
     const validate_auth = (req: any): boolean => {
-        if (!require_auth) return true; // Auth disabled
-        if (!auth_token) return true; // No token configured
-
+        if (!require_auth || !auth_token) return true;
         const auth_header = req.headers['authorization'];
         if (!auth_header) return false;
-
-        // Support both "Bearer <token>" and direct token
-        const token = auth_header.startsWith('Bearer ')
-            ? auth_header.slice(7)
-            : auth_header;
-
+        const token = auth_header.startsWith('Bearer ') ? auth_header.slice(7) : auth_header;
         return token === auth_token;
     };
 
-    // Security: validate MCP protocol version
     const validate_protocol_version = (req: any): boolean => {
         const version = req.headers['mcp-protocol-version'];
-        if (!version) return true; // Allow requests without version for backwards compatibility
-
-        const supported = ['2025-03-26', '2025-06-18'];
+        if (!version) return true;
+        // Allow both legacy SSE-era and modern Streamable HTTP protocol versions
+        const supported = ['2024-11-05', '2025-03-26', '2025-06-18'];
         return supported.includes(version);
     };
 
-    const handle_req = async (req: any, res: any) => {
-        try {
-            // Security: validate Origin to prevent DNS rebinding attacks
-            if (!validate_origin(req)) {
-                if (should_log('warn')) {
-                    console.error("[MCP] Rejected request from invalid origin:", req.headers.origin);
-                }
-                send_err(res, -32600, "Invalid Origin header", null, 403);
-                return;
-            }
+    // ==================== UTILITY FUNCTIONS ====================
 
-            // Security: validate authentication token
-            if (!validate_auth(req)) {
-                if (should_log('warn')) {
-                    console.error("[MCP] Rejected request with invalid authentication");
-                }
-                send_err(res, -32600, "Authentication required", null, 401);
-                return;
-            }
+    const validateRequestSecurity = (req: any, res: ServerResponse): boolean => {
+        if (!validate_origin(req)) {
+            if (should_log('warn')) console.error("[MCP] Rejected request from invalid origin:", req.headers.origin);
+            send_err(res, -32600, "Invalid Origin header", null, 403);
+            return false;
+        }
+        if (!validate_auth(req)) {
+            if (should_log('warn')) console.error("[MCP] Rejected request with invalid authentication");
+            send_err(res, -32600, "Authentication required", null, 401);
+            return false;
+        }
+        if (!validate_protocol_version(req)) {
+            if (should_log('warn')) console.error("[MCP] Rejected request with unsupported protocol version:", req.headers['mcp-protocol-version']);
+            send_err(res, -32600, "Unsupported MCP protocol version", null, 400);
+            return false;
+        }
+        return true;
+    };
 
-            // Security: validate MCP protocol version
-            if (!validate_protocol_version(req)) {
-                if (should_log('warn')) {
-                    console.error("[MCP] Rejected request with unsupported protocol version:", req.headers['mcp-protocol-version']);
-                }
-                send_err(res, -32600, "Unsupported MCP protocol version", null, 400);
-                return;
-            }
-
-            const pay = await extract_pay(req);
-            if (!pay || typeof pay !== "object") {
-                send_err(res, -32600, "Request body must be a JSON object");
-                return;
-            }
-
-            const sessionId = req.headers['mcp-session-id'] as string | undefined;
-            let transport: StreamableHTTPServerTransport;
-
-            // Session management: reuse existing session or create new one
-            if (sessionId && transports[sessionId]) {
-                // Reuse existing session transport
-                transport = transports[sessionId];
-                if (should_log('debug')) {
-                    console.error("[MCP] Reusing session:", sessionId);
-                }
-            } else if (!sessionId && isInitializeRequest(pay)) {
-                // New session initialization
-                transport = new StreamableHTTPServerTransport({
-                    sessionIdGenerator: () => randomUUID(),
-                    enableJsonResponse: true,
-                    onsessioninitialized: (id) => {
-                        transports[id] = transport;
-                        if (should_log('info')) {
-                            console.error("[MCP] Session initialized:", id);
-                        }
-                    },
-                    onsessionclosed: (id) => {
-                        delete transports[id];
-                        if (should_log('info')) {
-                            console.error("[MCP] Session closed:", id);
-                        }
-                    },
-                });
-
-                // Resource cleanup: remove transport when connection closes
-                transport.onclose = () => {
-                    if (transport.sessionId) {
-                        delete transports[transport.sessionId];
-                        if (should_log('debug')) {
-                            console.error("[MCP] Transport closed for session:", transport.sessionId);
-                        }
-                    }
-                };
-
-                // Connect server to new transport
-                await srv.connect(transport);
-                if (should_log('info')) {
-                    console.error("[MCP] New session created");
-                }
-            } else {
-                // Invalid: non-initialize request without valid session ID
-                send_err(res, -32000, "Invalid session: missing or invalid session ID for non-initialize request", null, 400);
-                return;
-            }
-
-            if (should_log('debug')) {
-                console.error("[MCP] Processing request:", pay.method);
-            }
-            set_hdrs(res);
-
-            // Resource cleanup: close transport when response finishes
-            res.on('close', () => {
-                if (!transport.sessionId) {
-                    // Stateless transport can be closed immediately
-                    transport.close().catch((err: any) => {
-                        console.error("[MCP] Error closing transport:", err);
-                    });
-                }
-            });
-
-            await transport.handleRequest(req, res, pay);
-        } catch (error) {
-            console.error("[MCP] Error handling request:", error);
-            if (error instanceof SyntaxError) {
-                send_err(res, -32700, "Parse error: Invalid JSON");
-                return;
-            }
-            if (!res.headersSent)
-                send_err(
-                    res,
-                    -32603,
-                    "Internal server error",
-                    (error as any)?.id ?? null,
-                    500,
-                );
+    const logRequestDetails = (req: any, msg?: string) => {
+        if (should_log('debug')) {
+            console.error("[MCP] ===== Request =====");
+            if (msg) console.error(`[MCP] ${msg}`);
+            console.error("[MCP] Method:", req.method);
+            console.error("[MCP] URL:", req.url);
+            console.error("[MCP] Accept:", req.headers.accept);
+            console.error("[MCP] Content-Type:", req.headers['content-type']);
+            console.error("[MCP] Mcp-Session-Id:", req.headers['mcp-session-id']);
+            console.error("[MCP] MCP-Protocol-Version:", req.headers['mcp-protocol-version']);
         }
     };
 
-    app.post("/mcp", (req: any, res: any) => {
-        void handle_req(req, res);
-    });
-
-    // GET /mcp: Support SSE streams for server-initiated messages
-    app.get("/mcp", async (req: any, res: any) => {
+    // HTTP Streamable HTTP endpoint compatible with Copilot & Gemini CLI (httpUrl)
+    app.all("/mcp", async (req: any, res: any) => {
         try {
-            // Security: validate Origin
-            if (!validate_origin(req)) {
-                send_err(res, -32600, "Invalid Origin header", null, 403);
+            // CORS preflight: keep simple and fast, don't run full MCP pipeline
+            if (req.method === "OPTIONS") {
+                res.statusCode = 204;
+                set_hdrs(res);
+                res.end();
                 return;
             }
 
-            const sessionId = req.headers['mcp-session-id'] as string;
-            const transport = transports[sessionId];
+            logRequestDetails(req, `${req.method} /mcp`);
+            if (!validateRequestSecurity(req, res)) return;
 
-            if (!transport) {
-                send_err(res, -32000, "Invalid session ID", null, 400);
-                return;
-            }
+            const transport = new StreamableHTTPServerTransport({
+                // Stateless HTTP streaming like Context7 example
+                sessionIdGenerator: undefined,
+                enableJsonResponse: true,
+            });
 
-            if (should_log('debug')) {
-                console.error("[MCP] GET request for session:", sessionId);
-            }
-            set_hdrs(res);
-            await transport.handleRequest(req, res);
+            // Ensure resources are cleaned up when the HTTP request ends
+            res.on("close", () => {
+                transport.close().catch((err: any) => {
+                    console.error("[MCP] Error closing HTTP transport:", err);
+                });
+            });
+
+            // Connect MCP server to this per-request transport
+            await srv.connect(transport);
+
+            const body = await extract_pay(req);
+            await transport.handleRequest(req, res, body);
         } catch (error) {
-            console.error("[MCP] Error handling GET request:", error);
+            console.error("[MCP] Error handling HTTP /mcp request:", error);
             if (!res.headersSent) {
                 send_err(res, -32603, "Internal server error", null, 500);
             }
         }
-    });
-
-    // DELETE /mcp: Support explicit session termination
-    app.delete("/mcp", async (req: any, res: any) => {
-        try {
-            const sessionId = req.headers['mcp-session-id'] as string;
-            const transport = transports[sessionId];
-
-            if (!transport) {
-                send_err(res, -32000, "Invalid session ID", null, 404);
-                return;
-            }
-
-            if (should_log('info')) {
-                console.error("[MCP] DELETE request for session:", sessionId);
-            }
-
-            // Close and cleanup session
-            await transport.close();
-            delete transports[sessionId];
-
-            res.statusCode = 200;
-            set_hdrs(res);
-            res.end(JSON.stringify({ jsonrpc: "2.0", result: { success: true }, id: null }));
-        } catch (error) {
-            console.error("[MCP] Error handling DELETE request:", error);
-            if (!res.headersSent) {
-                send_err(res, -32603, "Internal server error", null, 500);
-            }
-        }
-    });
-
-    app.options("/mcp", (_req: any, res: any) => {
-        res.statusCode = 204;
-        set_hdrs(res);
-        res.end();
-    });
-
-    app.put("/mcp", (_req: any, res: any) => {
-        send_err(res, -32600, "Method not supported. Use POST /mcp with JSON payload.", null, 405);
     });
 };
 

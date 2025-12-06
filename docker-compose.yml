@@ -19,6 +19,7 @@ services:
       # Core Configuration
       - OM_PORT=${OM_PORT:-8080}
       - OM_BIND_HOST=${OM_BIND_HOST:-0.0.0.0}
+      - OM_MCP_LOG_LEVEL=${OM_MCP_LOG_LEVEL:-info}
       - OM_MODE=${OM_MODE:-standard}
       - OM_TIER=${OM_TIER:-hybrid}
       - OM_DB_PATH=${OM_DB_PATH:-/data/openmemory.sqlite}
