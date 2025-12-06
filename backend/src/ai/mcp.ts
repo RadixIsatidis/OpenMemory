@@ -508,6 +508,21 @@ const extract_pay = async (req: any) => {
 export const mcp = (app: any) => {
     const srv = create_mcp_srv();
 
+    // Single shared HTTP transport for this process. This matches the
+    // "adapt stdio to HTTP" examples from the MCP and Mastra docs, and avoids
+    // repeatedly creating/closing transports which can lead to stream
+    // termination warnings in some clients.
+    const httpTransport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+        enableJsonResponse: true,
+    });
+
+    // Connect once at startup; all subsequent HTTP requests are funneled
+    // through this transport via handleRequest.
+    void srv.connect(httpTransport).catch((err: any) => {
+        console.error("[MCP] Failed to connect HTTP transport:", err);
+    });
+
     // Configuration: Origin whitelist (configurable via environment)
     const allowed_origins = process.env.OM_MCP_ALLOWED_ORIGINS
         ? process.env.OM_MCP_ALLOWED_ORIGINS.split(',')
@@ -600,24 +615,9 @@ export const mcp = (app: any) => {
             logRequestDetails(req, `${req.method} /mcp`);
             if (!validateRequestSecurity(req, res)) return;
 
-            const transport = new StreamableHTTPServerTransport({
-                // Stateless HTTP streaming like Context7 example
-                sessionIdGenerator: undefined,
-                enableJsonResponse: true,
-            });
-
-            // Ensure resources are cleaned up when the HTTP request ends
-            res.on("close", () => {
-                transport.close().catch((err: any) => {
-                    console.error("[MCP] Error closing HTTP transport:", err);
-                });
-            });
-
-            // Connect MCP server to this per-request transport
-            await srv.connect(transport);
-
             const body = await extract_pay(req);
-            await transport.handleRequest(req, res, body);
+
+            await httpTransport.handleRequest(req, res, body);
         } catch (error) {
             console.error("[MCP] Error handling HTTP /mcp request:", error);
             if (!res.headersSent) {

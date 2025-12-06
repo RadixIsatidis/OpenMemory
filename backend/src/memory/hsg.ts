@@ -1105,7 +1105,7 @@ export async function add_hsg_memory(
         if (tier === "smart" && mean_vec.length > 128) {
             const comp = compress_vec_for_storage(mean_vec, 128);
             const comp_buf = vectorToBuffer(comp);
-            await q.upd_compressed_vec.run(comp_buf, id);
+            await q.upd_compressed_vec.run(id, comp_buf);
         }
 
         await create_single_waypoint(id, mean_vec, now, user_id);
