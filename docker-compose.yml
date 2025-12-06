@@ -12,12 +12,13 @@ services:
       - "host.docker.internal:host-gateway"
     container_name: openmemory
     ports:
-      - "11919:11919"
+      - "11919:8080"
     env_file:
       - .env
     environment:
       # Core Configuration
       - OM_PORT=${OM_PORT:-8080}
+      - OM_BIND_HOST=${OM_BIND_HOST:-0.0.0.0}
       - OM_MODE=${OM_MODE:-standard}
       - OM_TIER=${OM_TIER:-hybrid}
       - OM_DB_PATH=${OM_DB_PATH:-/data/openmemory.sqlite}
@@ -128,12 +129,6 @@ services:
     volumes:
       - openmemory_data:/data
     restart: unless-stopped
-    healthcheck:
-      test: ['CMD', 'curl', '-f', 'http://localhost:8080/health']
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
 
 volumes:
   openmemory_data:
