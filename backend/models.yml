@@ -6,38 +6,33 @@
 # Each sector can use different models optimized for that type of memory
 
 episodic:
-  ollama: nomic-embed-text
+  ollama: snowflake-arctic-embed
   openai: text-embedding-3-small
-  gemini: models/text-embedding-004
-  aws: amazon.titan-embed-text-v2:0
+  gemini: models/embedding-001
   local: all-MiniLM-L6-v2
 
 semantic:
-  ollama: nomic-embed-text
+  ollama: snowflake-arctic-embed
   openai: text-embedding-3-small
-  gemini: models/text-embedding-004
-  aws: amazon.titan-embed-text-v2:0
+  gemini: models/embedding-001
   local: all-MiniLM-L6-v2
 
 procedural:
-  ollama: nomic-embed-text
+  ollama: snowflake-arctic-embed
   openai: text-embedding-3-small
-  gemini: models/text-embedding-004
-  aws: amazon.titan-embed-text-v2:0
+  gemini: models/embedding-001
   local: all-MiniLM-L6-v2
 
 emotional:
-  ollama: nomic-embed-text
+  ollama: snowflake-arctic-embed
   openai: text-embedding-3-small
-  gemini: models/text-embedding-004
-  aws: amazon.titan-embed-text-v2:0
+  gemini: models/embedding-001
   local: all-MiniLM-L6-v2
 
 reflective:
-  ollama: nomic-embed-text
+  ollama: snowflake-arctic-embed
   openai: text-embedding-3-large
-  gemini: models/text-embedding-004
-  aws: amazon.titan-embed-text-v2:0
+  gemini: models/embedding-001
   local: all-mpnet-base-v2
 # Available Ollama models (pull with: ollama pull <model>)
 # - nomic-embed-text (768d, recommended)
@@ -50,9 +45,5 @@ reflective:
 # - text-embedding-3-large (3072d)
 
 # Gemini models:
-# - models/text-embedding-004 (768d) - latest
-# - models/embedding-001 (768d) - deprecated
-
-#AWS models:
-# - amazon.titan-embed-text-v2:0 (1024d, 512d, 256)
+# - models/embedding-001 (768d)
 

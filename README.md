@@ -320,7 +320,6 @@ graph TB
     CONSOLIDATE -.->|Pattern Update| WAYPOINT
 ```
 
-
 ---
 
 # 5. Installation & Setup (Three Ways)
@@ -514,12 +513,53 @@ Add to `.mcp.json`:
 }
 ```
 
+### Environment Variables
+
+OpenMemory's MCP server supports the following configuration options:
+
+**Security & Authentication:**
+
+* `OM_MCP_REQUIRE_AUTH` - Enable authentication (default: `false`)
+* `OM_MCP_AUTH_TOKEN` - Bearer token for authentication (used when `OM_MCP_REQUIRE_AUTH=true`)
+* `OM_MCP_ALLOWED_ORIGINS` - Comma-separated list of allowed origins (default: `http://localhost,http://127.0.0.1,https://localhost,https://127.0.0.1`)
+
+**Server Configuration:**
+
+* `OM_BIND_HOST` - Host to bind server (default: `127.0.0.1` for local-only access)
+* `OM_MCP_LOG_LEVEL` - Log verbosity: `error`, `warn`, `info`, `debug` (default: `info`)
+
+**Example with authentication:**
+
+```bash
+export OM_MCP_REQUIRE_AUTH=true
+export OM_MCP_AUTH_TOKEN=your-secret-token-here
+npm start
+```
+
+Then configure your MCP client:
+
+```json
+{
+  "mcpServers": {
+    "openmemory": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer your-secret-token-here"
+      }
+    }
+  }
+}
+```
+
 ### Deep Benefits
 
 * Local-first memory = no privacy concerns
 * IDE agents gain persistent memory about your projects
 * Explainable recall aids debugging & refactoring
 * Works offline
+* **Production-ready security** with authentication & origin validation
+* **Multi-client support** with session management
 
 ---
 

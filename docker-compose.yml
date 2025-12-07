@@ -1,15 +1,25 @@
-version: '3.8'
-
 services:
   openmemory:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    container_name: openmemory
     ports:
-      - '8080:8080'
+      - "11919:8080"
+    env_file:
+      - .env
     environment:
       # Core Configuration
       - OM_PORT=${OM_PORT:-8080}
+      - OM_BIND_HOST=${OM_BIND_HOST:-0.0.0.0}
+      - OM_MCP_LOG_LEVEL=${OM_MCP_LOG_LEVEL:-info}
       - OM_MODE=${OM_MODE:-standard}
       - OM_TIER=${OM_TIER:-hybrid}
       - OM_DB_PATH=${OM_DB_PATH:-/data/openmemory.sqlite}
@@ -121,12 +131,6 @@ services:
     volumes:
       - openmemory_data:/data
     restart: unless-stopped
-    healthcheck:
-      test: ['CMD', 'curl', '-f', 'http://localhost:8080/health']
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
 
   # Optional: Valkey for high-performance vector storage
   # Uncomment to use Valkey instead of SQLite/PostgreSQL for vectors

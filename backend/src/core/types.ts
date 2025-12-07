@@ -38,7 +38,7 @@ export type mem_row = {
     version: number;
 };
 
-export type rpc_err_code = -32600 | -32603;
+export type rpc_err_code = -32700 | -32600 | -32603 | -32000;
 
 export type ingest_req = {
     source: "file" | "link" | "connector";

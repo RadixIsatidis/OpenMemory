@@ -1,4 +1,4 @@
-const server = require("./server.js");
+import express from "express";
 import { env, tier } from "../core/cfg";
 import { run_decay_process, prune_weak_waypoints } from "../memory/hsg";
 import { mcp } from "../ai/mcp";
@@ -21,7 +21,8 @@ const ASC = `   ____                   __  __
         | |                                                 __/ |
         |_|                                                |___/ `;
 
-const app = server({ max_payload_size: env.max_payload_size });
+// Create Express application
+const app = express();
 
 console.log(ASC);
 console.log(`[CONFIG] Vector Dimension: ${env.vec_dim}`);
@@ -38,24 +39,43 @@ if (env.emb_kind !== "synthetic" && (tier === "hybrid" || tier === "fast")) {
     );
 }
 
+// ==================== MIDDLEWARE ====================
+
+// Body parsing middleware (critical for MCP)
+const payloadLimit = env.max_payload_size || 10_000_000;
+app.use(express.json({ 
+    limit: payloadLimit,
+    // Handle JSON parsing errors gracefully
+    verify: (req: any, res: any, buf: Buffer, encoding: string) => {
+        try {
+            JSON.parse(buf.toString());
+        } catch (e) {
+            throw new SyntaxError('Invalid JSON payload');
+        }
+    }
+}));
+app.use(express.urlencoded({ extended: true, limit: payloadLimit }));
+
+// JSON parsing error handler
+app.use((err: any, req: any, res: any, next: any) => {
+    if (err instanceof SyntaxError && 'body' in err) {
+        return res.status(400).json({
+            jsonrpc: "2.0",
+            error: {
+                code: -32700,
+                message: "Parse error: Invalid JSON"
+            },
+            id: null
+        });
+    }
+    next(err);
+});
+
+// Request tracking
 app.use(req_tracker_mw());
 
-app.use((req: any, res: any, next: any) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader(
-        "Access-Control-Allow-Methods",
-        "GET,POST,PUT,DELETE,OPTIONS",
-    );
-    res.setHeader(
-        "Access-Control-Allow-Headers",
-        "Content-Type,Authorization,x-api-key",
-    );
-    if (req.method === "OPTIONS") {
-        res.status(200).end();
-        return;
-    }
-    next();
-});
+// Note: CORS headers are handled by Nginx reverse proxy
+// See nginx.conf for CORS configuration
 
 app.use(authenticate_api_request);
 
@@ -65,7 +85,13 @@ if (process.env.OM_LOG_AUTH === "true") {
 
 routes(app);
 
+// MCP Integration - Streamable HTTP endpoint
+console.log("[MCP] Initializing MCP server with Streamable HTTP transport...");
 mcp(app);
+console.log("[MCP] Endpoint configured at POST /mcp");
+console.log("[MCP] Compatible with: Gemini CLI, Claude Code, VS Code, Copilot, Codex CLI");
+console.log("[MCP] For IntelliJ: Use mcp-proxy adapter (see documentation)");
+
 if (env.mode === "langgraph") {
     console.log("[MODE] LangGraph integration enabled");
 }
@@ -110,8 +136,11 @@ start_reflection();
 start_user_summary_reflection();
 
 console.log(`[SERVER] Starting on port ${env.port}`);
-app.listen(env.port, () => {
-    console.log(`[SERVER] Running on http://localhost:${env.port}`);
+// Bind to 127.0.0.1 for local security (prevents LAN scanning)
+// For production deployment, configure via environment or load balancer
+const host = process.env.OM_BIND_HOST || "127.0.0.1";
+app.listen(env.port, host, () => {
+    console.log(`[SERVER] Running on http://${host}:${env.port}`);
     sendTelemetry().catch(() => {
         // ignore telemetry failures
     });
